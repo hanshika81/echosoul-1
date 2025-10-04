@@ -1,0 +1,13 @@
+streamlit==1.37.1
+openai>=1.12.0
+pandas==2.2.2
+numpy==1.26.4
+Pillow==10.2.0
+python-dotenv==1.0.1
+streamlit-webrtc==0.47.1
+aiortc==1.7.1
+requests==2.32.3
+spacy==3.7.2
+aiohttp==3.9.5
+pyjwt==2.9.0
+agora-token-service==1.0.0
