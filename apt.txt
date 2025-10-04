@@ -2,3 +2,7 @@ ffmpeg
 libsm6
 libxext6
 libgl1
+libsndfile1
+libportaudio2
+libopus0
+libvpx7
