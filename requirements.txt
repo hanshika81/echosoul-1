@@ -10,4 +10,3 @@ requests==2.32.3
 spacy==3.7.2
 aiohttp==3.9.5
 pyjwt==2.9.0
-agora-token-service==1.0.0
