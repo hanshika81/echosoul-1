@@ -1,16 +1,15 @@
-# 🌙 EchoSoul
+# EchoSoul
 
-EchoSoul is an evolving AI companion with memory, emotion, and voice chat — powered by OpenAI, Streamlit, and Agora.
+EchoSoul — an adaptive, memoryful AI companion (Streamlit app).
 
-## 🚀 Features
-- Persistent long-term memory
-- Adaptive emotional tone
-- Chronological life timeline
-- Live voice chat via Agora + WebRTC
-- Secure API key management
+## Features
+- Persistent Memory
+- Adaptive Personality
+- Emotion Recognition (TextBlob; spaCy optional)
+- Life Timeline
+- Encrypted Vault
+- Brain Mimic
+- WebRTC Voice Call (Agora-ready)
 
-## 🧰 Setup
-1. Clone this repo:
-   ```bash
-   git clone https://github.com/yourusername/echosoul.git
-   cd echosoul
+## Quick local run
+1. Create `.env` with:
