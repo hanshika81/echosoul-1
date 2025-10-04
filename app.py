@@ -14,7 +14,11 @@ load_dotenv()
 st.set_page_config(page_title="EchoSoul", layout="wide")
 
 # Initialize OpenAI API Key
-openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+import os
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+AGORA_APP_ID = os.getenv("AGORA_APP_ID")
+AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE")
 
 # Load NLP model
 nlp = spacy.load("en_core_web_sm")
