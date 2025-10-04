@@ -21,7 +21,13 @@ AGORA_APP_ID = os.getenv("AGORA_APP_ID")
 AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE")
 
 # Load NLP model
-nlp = spacy.load("en_core_web_sm")
+import subprocess, sys, spacy
+
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
 
 # Persistent memory file
 MEMORY_FILE = "data/memory.json"
