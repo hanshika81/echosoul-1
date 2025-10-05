@@ -281,9 +281,12 @@ with col1:
             st.markdown(f"**EchoSoul:** {reply}")
             st.session_state.chat_input = ""  
 st.rerun()  # 👈 clears the box after sending
-    if condition:
-    with col2:
-        st.write("Hello")
+    def show_page():
+    st.write("Start of page")
+    if condition:       # aligned correctly inside function
+        with col2:
+            st.write("Hello World")
+            
             if not user_input.strip():
                 st.warning("Type the memory content in the box first.")
             else:
