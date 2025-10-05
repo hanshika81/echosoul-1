@@ -364,9 +364,11 @@ if search_query.strip():
         st.markdown(f"**{r['title']}** — {r['timestamp']}")
         st.write(r["content"])
         st.markdown("---")
-        ault"):
-        if not vault_password:
-            st.warning("Set a vault password in the sidebar first.")
+        # Vault
+if tab == "Private Vault":
+    if not vault_password:
+        st.warning("Set a vault password in the sidebar first.")
+    
         elif not vc.strip():
             st.warning("Secret content cannot be empty.")
         else:
