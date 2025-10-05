@@ -334,7 +334,8 @@ if tab == "Private Vault":
     st.markdown("Add a new vault item")
     vt = st.text_input("Title for vault item", key="vt")
     vc = st.text_area("Secret content", key="vc")
-    if st.button("Save to vst.markdown("### Search timeline")
+    if st.button("Save to vault"):
+    st.markdown("### Search timeline")
 
 # Chat input
 user_input = st.text_input("Say something to EchoSoul", key="chat_input")
