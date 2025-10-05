@@ -281,17 +281,37 @@ with col1:
             st.markdown(f"**EchoSoul:** {reply}")
             st.session_state.chat_input = ""  
 st.rerun()  # 👈 clears the box after sending
-    def show_page():
+    user_input = st.text_input("Say something to EchoSoul", key="chat_input")
+coll, col2, col3 = st.columns([1, 1, 1])
+
+with coll:
+    if st.button("Send"):
+        if not user_input.strip():
+            st.warning("Type something first.")
+        else:
+            reply = generate_reply(data, user_input.strip(), use_memories=True)
+            st.success("Reply generated.")
+            # show new reply inline
+            st.markdown(f"**You:** {user_input}")
+            st.markdown(f"**EchoSoul:** {reply}")
+            st.session_state.chat_input = ""
+st.rerun()  # clears the box after sending
+
+
+def show_page():
     st.write("Start of page")
-    if condition:       # aligned correctly inside function
+
+    if condition:
         with col2:
             st.write("Hello World")
-            
+
             if not user_input.strip():
                 st.warning("Type the memory content in the box first.")
             else:
                 add_memory(data, "User added memory", user_input.strip())
                 st.success("Memory saved to timeline.")
+                
+            
     with col3:
         if st.button("Save as fact (short)"):
             text = user_input.strip()
