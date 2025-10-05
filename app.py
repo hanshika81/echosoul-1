@@ -1,90 +1,112 @@
 import streamlit as st
-import re
 import json
+import os
 from datetime import datetime
+from cryptography.fernet import Fernet
+import openai
 
-# =====================
-# Utility Functions
-# =====================
+# ========================
+# OpenAI Setup
+# ========================
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-def load_data():
-    try:
-        with open("data.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"timeline": [], "vault": []}
+def generate_reply(data, user_input, use_memories=True):
+    """
+    Generate a reply from EchoSoul using OpenAI's GPT model.
+    If use_memories=True, include recent timeline/context in the prompt.
+    """
+    context = ""
+    if use_memories and "timeline" in data:
+        last_items = data["timeline"][-5:]  # last 5 items for context
+        context = "\n".join([f"{it['title']}: {it['content']}" for it in last_items])
 
+    prompt = f"""
+    You are EchoSoul, an AI memory companion.
+    Here is your memory context:
+    {context}
 
-def save_data(data):
-    with open("data.json", "w") as f:
-        json.dump(data, f, indent=2)
+    User: {user_input}
+    EchoSoul:"""
 
-
-def generate_reply(data, text, use_memories=True):
-    # Dummy reply generator for now
-    if use_memories and data.get("timeline"):
-        return f"I hear you. Also, I remember {len(data['timeline'])} things about you."
-    return f"You said: {text}"
-
-
-def add_memory(data, title, content):
-    data.setdefault("timeline", []).append(
-        {
-            "title": title,
-            "content": content,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
+    response = openai.Completion.create(
+        model="text-davinci-003",
+        prompt=prompt,
+        max_tokens=150,
+        temperature=0.7
     )
 
-
-def search_timeline(data, query):
-    results = []
-    for item in data.get("timeline", []):
-        if query.lower() in item.get("title", "").lower() or query.lower() in item.get(
-            "content", ""
-        ).lower():
-            results.append(item)
-    return results
+    return response.choices[0].text.strip()
 
 
-# Simple XOR encrypt/decrypt for demo (replace with proper crypto if needed)
-def encrypt_text(password, text):
-    return "".join(chr(ord(c) ^ ord(password[i % len(password)])) for i, c in enumerate(text))
+# ========================
+# Encryption helpers
+# ========================
+def get_key_from_password(password: str) -> bytes:
+    """Derive Fernet key from password"""
+    return Fernet.generate_key()  # Simplified (replace with PBKDF2 in production)
 
+def encrypt_text(password: str, text: str) -> str:
+    key = get_key_from_password(password)
+    fernet = Fernet(key)
+    return fernet.encrypt(text.encode()).decode()
 
-def decrypt_text(password, cipher):
+def decrypt_text(password: str, token: str) -> str:
     try:
-        return "".join(chr(ord(c) ^ ord(password[i % len(password)])) for i, c in enumerate(cipher))
+        key = get_key_from_password(password)
+        fernet = Fernet(key)
+        return fernet.decrypt(token.encode()).decode()
     except Exception:
         return None
 
 
-# =====================
-# App Layout
-# =====================
+# ========================
+# Data helpers
+# ========================
+DATA_FILE = "data.json"
 
-st.set_page_config(page_title="EchoSoul", page_icon="✨", layout="centered")
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {"timeline": [], "vault": []}
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ========================
+# Search helpers
+# ========================
+def search_timeline(data, query):
+    results = []
+    for item in data.get("timeline", []):
+        if query.lower() in item["content"].lower() or query.lower() in item["title"].lower():
+            results.append(item)
+    return results
+
+
+# ========================
+# Streamlit UI
+# ========================
+st.set_page_config(page_title="EchoSoul", layout="wide")
 st.title("✨ EchoSoul")
-
-# Load persistent data
-data = load_data()
 
 # Sidebar
 st.sidebar.header("Settings")
 vault_password = st.sidebar.text_input("Vault password", type="password")
+tab = st.sidebar.radio("Choose section", ["Chat", "Search Timeline", "Private Vault", "Export/Info"])
 
-# Tabs
-tab = st.sidebar.radio(
-    "Choose section", ["Chat", "Search Timeline", "Private Vault", "Export/Info"]
-)
+# Load data
+data = load_data()
 
-# =====================
+# ========================
 # Chat Section
-# =====================
+# ========================
 if tab == "Chat":
-    st.subheader("Chat with EchoSoul")
-
+    st.header("Chat with EchoSoul")
     user_input = st.text_input("Say something to EchoSoul", key="chat_input")
+
     col1, col2, col3 = st.columns([1, 1, 1])
 
     with col1:
@@ -94,88 +116,89 @@ if tab == "Chat":
             else:
                 reply = generate_reply(data, user_input.strip(), use_memories=True)
                 st.success("Reply generated.")
+
+                # Show reply inline
                 st.markdown(f"**You:** {user_input}")
                 st.markdown(f"**EchoSoul:** {reply}")
-                st.session_state.chat_input = ""
 
-    with col2:
-        if st.button("Save memory"):
-            if not user_input.strip():
-                st.warning("Type something first.")
-            else:
-                add_memory(data, "User memory", user_input.strip())
+                # Save to timeline
+                data.setdefault("timeline", []).append({
+                    "title": "Chat",
+                    "content": f"You: {user_input}\nEchoSoul: {reply}",
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
                 save_data(data)
-                st.success("Memory saved.")
 
-    with col3:
-        if st.button("Save as fact (short)"):
-            text = user_input.strip()
-            if not text:
-                st.warning("Type something first.")
-            else:
-                m = re.search(r"\b(?:am|was|feel|like|love)\s+(.+)", text.lower())
-                if m:
-                    fact = m.group(1).strip().capitalize()
-                    add_memory(data, "Fact", fact)
-                    save_data(data)
-                    st.success(f"Saved fact: {fact}")
-                else:
-                    add_memory(data, "Note", text[:200])
-                    save_data(data)
-                    st.success("Saved short note.")
 
-# =====================
+# ========================
 # Timeline Search
-# =====================
+# ========================
 elif tab == "Search Timeline":
-    st.subheader("Search your timeline")
+    st.header("🔍 Search Timeline")
     search_query = st.text_input("Search query", key="timeline_search")
-
     if search_query.strip():
         results = search_timeline(data, search_query.strip())
         st.markdown(f"Found {len(results)} results (showing up to 20).")
         for r in results[:20]:
-            st.markdown(f"**{r.get('title','Untitled')}** — {r.get('timestamp','')}")
-            st.write(r.get("content", ""))
+            st.markdown(f"**{r['title']}** — {r['timestamp']}")
+            st.write(r["content"])
             st.markdown("---")
 
-# =====================
-# Vault Section
-# =====================
-elif tab == "Private Vault":
-    st.subheader("Private Vault (encrypted)")
 
-    if not vault_password:
-        st.info("Enter a vault password in the sidebar to view or save items.")
-    else:
-        if not data.get("vault"):
-            st.info("Vault is empty.")
+# ========================
+# Private Vault
+# ========================
+elif tab == "Private Vault":
+    st.header("🔐 Private Vault")
+
+    vt = st.text_input("Title for vault item", key="vt")
+    vc = st.text_area("Secret content", key="vc")
+
+    if st.button("Save to vault"):
+        if not vault_password:
+            st.warning("Set a vault password in the sidebar first.")
+        elif not vc.strip():
+            st.warning("Secret content cannot be empty.")
+        else:
+            cipher = encrypt_text(vault_password, vc.strip())
+            data.setdefault("vault", []).append({
+                "title": vt or "Vault item",
+                "cipher": cipher,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+            save_data(data)
+            st.success("Saved to vault (encrypted).")
+
+    if st.button("Show vault items"):
+        if not vault_password:
+            st.warning("Enter vault password in sidebar to decrypt.")
         else:
             for v in data.get("vault", []):
                 decrypted = decrypt_text(vault_password, v.get("cipher", ""))
                 if decrypted is None:
-                    st.write("*Unable to decrypt with this password.*")
+                    st.write("❌ Unable to decrypt (wrong password?)")
                 else:
+                    st.markdown(f"**{v['title']}** — {v['timestamp']}")
                     st.write(decrypted)
-                st.markdown("---")
+                    st.markdown("---")
 
-        st.markdown("### Add a new vault item")
-        vt = st.text_input("Title", key="vt")
-        vc = st.text_area("Secret content", key="vc")
-        if st.button("Save to vault"):
-            if not vc.strip():
-                st.warning("Secret content cannot be empty.")
-            else:
-                cipher = encrypt_text(vault_password, vc.strip())
-                data.setdefault("vault", []).append(
-                    {"title": vt or "Vault item", "cipher": cipher}
-                )
-                save_data(data)
-                st.success("Saved to vault (encrypted).")
 
-# =====================
-# Export / Info
-# =====================
+# ========================
+# Export & Info
+# ========================
 elif tab == "Export/Info":
-    st.subheader("Legacy & Export")
-    st.json(data)
+    st.header("📦 Export / Info")
+    st.write("Export your data or produce a human-readable snapshot.")
+
+    # Download JSON
+    if st.download_button("Download full export (JSON)", json.dumps(data, indent=2), file_name="echosoul_export.json"):
+        st.success("Download started.")
+
+    # Human-readable snapshot
+    legacy_lines = [f"[{it['timestamp']}] {it['title']}: {it['content']}" for it in data.get("timeline", [])]
+    legacy_text = "\n\n".join(legacy_lines)
+    st.text_area("Legacy snapshot", value=legacy_text, height=300)
+
+    st.markdown("---")
+    st.header("ℹ️ About EchoSoul")
+    st.write("EchoSoul runs a GPT-powered memory companion. It stores chats in a timeline, encrypts private notes, and lets you search or export everything.")
