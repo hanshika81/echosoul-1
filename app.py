@@ -11,7 +11,8 @@ except Exception:
     CRYPTO_AVAILABLE = False
 
 # Initialize OpenAI (key is read from Streamlit secrets)
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+import os
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
 # Data file (in-app directory; streamlit cloud allowed)
 DATA_FILE = "echosoul_data.json"
