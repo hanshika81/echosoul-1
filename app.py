@@ -67,9 +67,9 @@ except Exception:
 # ------------------------------------------------------------
 # Config & secrets
 # ------------------------------------------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else None
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AGORA_APP_ID = os.getenv("AGORA_APP_ID")
-AGORA_APP_CERT = os.getenv("AGORA_APP_CERTIFICATE")
+AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE")
 
 # Create OpenAI client if possible
 openai_client = None
