@@ -2,7 +2,10 @@
 import streamlit as st
 import os, json, hashlib, base64, datetime, re, typing
 from openai import OpenAI
+import os
+from openai import OpenAI
 
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 # Try to import cryptography Fernet; fallback to a lightweight XOR cipher
 try:
     from cryptography.fernet import Fernet, InvalidToken
