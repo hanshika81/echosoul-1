@@ -1,7 +1,6 @@
 # app.py — Full EchoSoul (GPT brain + timeline + vault + adaptive persona + export)
 import streamlit as st
 import os, json, hashlib, base64, datetime, re, typing
-from openai import OpenAI
 import os
 from openai import OpenAI
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
