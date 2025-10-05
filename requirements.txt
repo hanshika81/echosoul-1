@@ -13,3 +13,4 @@ nltk>=3.9.1
 # If you ever add them locally:
 # spacy==3.7.2
 # textblob==0.18.0
+streamlit-webrtc
