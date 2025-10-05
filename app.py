@@ -415,3 +415,7 @@ if st.sidebar.button("Extract keywords from sample"):
 # small footer info
 st.markdown("---")
 st.caption("EchoSoul — demo. Keep your OPENAI_API_KEY secret. This app stores session data in memory only and does not persist chat history by default.")
+if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 10000))
+    st.run()
