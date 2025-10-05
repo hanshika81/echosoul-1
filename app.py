@@ -4,6 +4,7 @@ import os, json, hashlib, base64, datetime, re, typing
 from openai import OpenAI
 import os
 from openai import OpenAI
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 # Try to import cryptography Fernet; fallback to a lightweight XOR cipher
