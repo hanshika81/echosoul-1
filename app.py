@@ -418,4 +418,4 @@ st.caption("EchoSoul — demo. Keep your OPENAI_API_KEY secret. This app stores 
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 10000))
-    st.run()
+  
