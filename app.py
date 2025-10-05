@@ -267,21 +267,7 @@ if tab == "Chat":
         st.markdown(f"**EchoSoul:** {c['bot']}")
         st.markdown("---")
 
-    user_input = st.text_input("Say something to EchoSoul", key="chat_input")
-col1, col2, col3 = st.columns([1,1,1])
-with col1:
-    if st.button("Send"):
-        if not user_input.strip():
-            st.warning("Type something first.")
-        else:
-            reply = generate_reply(data, user_input.strip(), use_memories=True)
-            st.success("Reply generated.")
-            # show new reply inline
-            st.markdown(f"**You:** {user_input}")
-            st.markdown(f"**EchoSoul:** {reply}")
-            st.session_state.chat_input = ""  
-st.rerun()  # 👈 clears the box after sending
-
+    
 def show_page():
     st.write("Start of page")
 
@@ -301,16 +287,8 @@ def show_page():
             text = user_input.strip()
             if not text:
                 st.warning("Type something first.")
-            else:
-                # detect "I am ...", "I like ..."
-                m = re.search(r"\bi (?:am|was|feel|like|love)\s+(.+)", text.lower())
-                if m:
-                    fact = m.group(1).strip().capitalize()
-                    add_memory(data, "Personal note", fact)
-                    st.success(f"Saved fact: {fact}")
-                else:
-                    add_memory(data, "Short note", text[:200])
-                    st.success("Saved short note.")
+            # Chat input
+
 
 if tab == "Life Timeline":
     st.subheader("Life Timeline — add, view, search")
@@ -332,15 +310,7 @@ if tab == "Life Timeline":
         st.write(item["content"])
         st.markdown("---")
 
-    st.markdown("### Search timeline")
-    q = st.text_input("Search query", key="timeline_search")
-    if q.strip():
-        results = search_timeline(data, q.strip())
-        st.markdown(f"Found {len(results)} results (showing up to 20).")
-        for r in results:
-            st.markdown(f"**{r['title']}** — {r['timestamp']}")
-            st.write(r["content"])
-            st.markdown("---")
+    
 
 if tab == "Private Vault":
     st.subheader("Private Vault (encrypted notes)")
@@ -364,7 +334,37 @@ if tab == "Private Vault":
     st.markdown("Add a new vault item")
     vt = st.text_input("Title for vault item", key="vt")
     vc = st.text_area("Secret content", key="vc")
-    if st.button("Save to vault"):
+    if st.button("Save to vst.markdown("### Search timeline")
+
+# Chat input
+user_input = st.text_input("Say something to EchoSoul", key="chat_input")
+col1, col2, col3 = st.columns([1, 1, 1])
+
+with col1:
+    if st.button("Send"):
+        if not user_input.strip():
+            st.warning("Type something first.")
+        else:
+            reply = generate_reply(data, user_input.strip(), use_memories=True)
+            st.success("Reply generated.")
+
+            # Show reply inline
+            st.markdown(f"**You:** {user_input}")
+            st.markdown(f"**EchoSoul:** {reply}")
+
+            # Clear input after sending
+            st.session_state.chat_input = ""
+
+# Timeline search
+search_query = st.text_input("Search query", key="timeline_search")
+if search_query.strip():
+    results = search_timeline(data, search_query.strip())
+    st.markdown(f"Found {len(results)} results (showing up to 20).")
+    for r in results[:20]:
+        st.markdown(f"**{r['title']}** — {r['timestamp']}")
+        st.write(r["content"])
+        st.markdown("---")
+        ault"):
         if not vault_password:
             st.warning("Set a vault password in the sidebar first.")
         elif not vc.strip():
