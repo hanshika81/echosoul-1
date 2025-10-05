@@ -1,15 +1,15 @@
-streamlit==1.37.1
-openai==1.12.0
-pandas==2.2.2
-numpy==1.26.4
-Pillow==10.2.0
-python-dotenv==1.0.1
-streamlit-webrtc==0.47.1
-requests==2.32.3
-spacy==3.7.2
-textblob==0.17.1
-nltk==3.8.1
-cryptography==42.0.5
-aiohttp==3.9.5
-aiortc==1.5.0
-PyJWT==2.9.0
+# --- Core packages ---
+streamlit==1.38.0
+openai>=1.3.0
+python-dotenv>=1.0.0
+cryptography>=42.0.0
+
+# --- Optional / lightweight extras ---
+streamlit-webrtc>=0.47.1
+nltk>=3.9.1
+
+# --- Notes ---
+# Avoid heavy packages (spacy, textblob) to keep build small and fast.
+# If you ever add them locally:
+# spacy==3.7.2
+# textblob==0.18.0
