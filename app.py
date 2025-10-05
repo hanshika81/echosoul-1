@@ -16,7 +16,21 @@ from textblob import TextBlob
 from cryptography.fernet import Fernet
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 from dotenv import load_dotenv
+# -------------------------------------------
+# Auto-install TextBlob/NLTK data if missing
+# -------------------------------------------
+import nltk
+from textblob import download_corpora
 
+try:
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
+    nltk.download("averaged_perceptron_tagger")
+    nltk.download("wordnet")
+    nltk.download("omw-1.4")
+    nltk.download("brown")
+    download_corpora.download_all()
 # Try to import spaCy (optional). If available, will be used for keyword extraction.
 try:
     import spacy
