@@ -13,6 +13,3 @@ cryptography==42.0.5
 aiohttp==3.9.5
 aiortc==1.5.0
 PyJWT==2.9.0
-# Auto-download required corpora
-nltk.download('punkt')
-python -m textblob.download_corpora
