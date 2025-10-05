@@ -281,8 +281,9 @@ with col1:
             st.markdown(f"**EchoSoul:** {reply}")
             st.session_state.chat_input = ""  
 st.rerun()  # 👈 clears the box after sending
+    if condition:
     with col2:
-        if st.button("Add to timeline"):
+        st.write("Hello")
             if not user_input.strip():
                 st.warning("Type the memory content in the box first.")
             else:
