@@ -16,7 +16,19 @@ from textblob import TextBlob
 from cryptography.fernet import Fernet
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 from dotenv import load_dotenv
+# Ensure NLTK and TextBlob corpora are available
+import nltk
+from textblob import download_corpora
 
+try:
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
+
+try:
+    download_corpora.download_all()
+except Exception:
+    pass
 # -------------------------------------------
 # Auto-install TextBlob/NLTK data if missing
 # -------------------------------------------
