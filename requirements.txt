@@ -1,17 +1,18 @@
 streamlit==1.37.1
-openai>=1.12.0
+openai==1.12.0
 pandas==2.2.2
 numpy==1.26.4
-spacy==3.7.2
-textblob==0.17.1
-cryptography==41.0.7
-streamlit-webrtc==0.47.1
-aiortc==1.5.0
 Pillow==10.2.0
 python-dotenv==1.0.1
+streamlit-webrtc==0.47.1
 requests==2.32.3
+spacy==3.7.2
+textblob==0.17.1
+nltk==3.8.1
+cryptography==42.0.5
 aiohttp==3.9.5
-pyjwt==2.9.0
-gTTS==2.5.4
-textblob
-nltk
+aiortc==1.5.0
+PyJWT==2.9.0
+# Auto-download required corpora
+nltk.download('punkt')
+python -m textblob.download_corpora
