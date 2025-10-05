@@ -282,21 +282,19 @@ with col1:
             st.session_state.chat_input = ""  
 st.rerun()  # 👈 clears the box after sending
     user_input = st.text_input("Say something to EchoSoul", key="chat_input")
-coll, col2, col3 = st.columns([1, 1, 1])
+col1, col2, col3 = st.columns([1,1,1])
 
-with coll:
+with col1:
     if st.button("Send"):
         if not user_input.strip():
             st.warning("Type something first.")
         else:
             reply = generate_reply(data, user_input.strip(), use_memories=True)
             st.success("Reply generated.")
-            # show new reply inline
             st.markdown(f"**You:** {user_input}")
             st.markdown(f"**EchoSoul:** {reply}")
             st.session_state.chat_input = ""
-st.rerun()  # clears the box after sending
-
+            st.rerun()  # clears the box after sending
 
 def show_page():
     st.write("Start of page")
