@@ -279,7 +279,8 @@ with col1:
             # show new reply inline
             st.markdown(f"**You:** {user_input}")
             st.markdown(f"**EchoSoul:** {reply}")
-            st.session_state.chat_input = ""   # 👈 clears the box after sending
+            st.session_state.chat_input = ""  
+st.rerun()  # 👈 clears the box after sending
     with col2:
         if st.button("Add to timeline"):
             if not user_input.strip():
