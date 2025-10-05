@@ -13,3 +13,5 @@ requests==2.32.3
 aiohttp==3.9.5
 pyjwt==2.9.0
 gTTS==2.5.4
+textblob
+nltk
