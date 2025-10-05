@@ -4,23 +4,21 @@ import hashlib
 import base64
 from cryptography.fernet import Fernet
 import streamlit as st
-import openai
+from openai import OpenAI
 from datetime import datetime
 
 # --------------------
 # OpenAI Setup
 # --------------------
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # --------------------
 # Utility functions
 # --------------------
 def generate_key(password: str) -> bytes:
-    """Generate a Fernet key from password."""
     return base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
 
 def encrypt_text(password: str, text: str) -> str:
-    """Encrypt text using password."""
     try:
         fernet = Fernet(generate_key(password))
         return fernet.encrypt(text.encode()).decode()
@@ -28,7 +26,6 @@ def encrypt_text(password: str, text: str) -> str:
         return None
 
 def decrypt_text(password: str, token: str) -> str:
-    """Decrypt text using password."""
     try:
         fernet = Fernet(generate_key(password))
         return fernet.decrypt(token.encode()).decode()
@@ -49,28 +46,25 @@ def save_data(data):
 # AI Reply Generator
 # --------------------
 def generate_reply(data, user_input, use_memories=True):
-    """Generate reply using OpenAI GPT, with optional memory context."""
     context = ""
     if use_memories and "timeline" in data and len(data["timeline"]) > 0:
-        last_items = data["timeline"][-5:]  # last 5 items
+        last_items = data["timeline"][-5:]
         context = "\n".join([f"{it['title']}: {it['content']}" for it in last_items])
 
-    prompt = f"""
-    You are EchoSoul, an AI memory companion.
-    Memory context:
-    {context}
-
-    User: {user_input}
-    EchoSoul:"""
+    messages = [
+        {"role": "system", "content": "You are EchoSoul, an AI memory companion."},
+        {"role": "system", "content": f"Memory context:\n{context}"},
+        {"role": "user", "content": user_input}
+    ]
 
     try:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=prompt,
-            max_tokens=150,
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # use gpt-4 or gpt-3.5-turbo if preferred
+            messages=messages,
+            max_tokens=200,
             temperature=0.7
         )
-        return response.choices[0].text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as e:
         return f"(Error: {e})"
 
@@ -88,11 +82,9 @@ st.set_page_config(page_title="EchoSoul", layout="wide")
 st.title("✨ EchoSoul")
 st.sidebar.header("Settings")
 
-# Sidebar
 vault_password = st.sidebar.text_input("Vault password", type="password")
 section = st.sidebar.radio("Choose section", ["Chat", "Search Timeline", "Private Vault", "Export/Info"])
 
-# Load data
 data = load_data()
 
 # --------------------
@@ -112,7 +104,6 @@ if section == "Chat":
         else:
             reply = generate_reply(data, user_input.strip(), use_memories=True)
 
-            # Save to timeline
             data["timeline"].append({
                 "title": f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 "content": f"You: {user_input}\nEchoSoul: {reply}"
@@ -123,7 +114,7 @@ if section == "Chat":
             st.markdown(f"**You:** {user_input}")
             st.markdown(f"**EchoSoul:** {reply}")
 
-            # Clear input safely
+            # Clear input properly
             st.session_state.chat_input = ""
 
 elif section == "Search Timeline":
