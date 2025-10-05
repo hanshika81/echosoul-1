@@ -1,421 +1,384 @@
-# app.py
-"""
-EchoSoul - Streamlit app main file.
-
-Design goals:
- - Use new OpenAI client API (openai.OpenAI)
- - Graceful fallback if optional heavy libs (spaCy, textblob, nltk, streamlit-webrtc, cryptography) are missing
- - Provide: chat, chat history, simple "brain mimic" keyword extraction, vault (optional encryption),
-   audio upload -> transcription (optional), environment secret reading, and helpful messages.
-"""
-
-import os
-import re
-import time
-import json
-from typing import List, Dict, Optional
-
+# app.py — Full EchoSoul (GPT brain + timeline + vault + adaptive persona + export)
 import streamlit as st
+import os, json, hashlib, base64, datetime, re, typing
+from openai import OpenAI
 
-# try to use new OpenAI client interface
+# Try to import cryptography Fernet; fallback to a lightweight XOR cipher
 try:
-    from openai import OpenAI
-    _HAS_OPENAI = True
+    from cryptography.fernet import Fernet, InvalidToken
+    CRYPTO_AVAILABLE = True
 except Exception:
-    _HAS_OPENAI = False
+    CRYPTO_AVAILABLE = False
 
-# optional libs that might be heavy to install on free hosts
-try:
-    import spacy  # optional, for better keyword extraction if available
-    _HAS_SPACY = True
-except Exception:
-    _HAS_SPACY = False
+# Initialize OpenAI (key is read from Streamlit secrets)
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-try:
-    from textblob import TextBlob
-    _HAS_TEXTBLOB = True
-except Exception:
-    _HAS_TEXTBLOB = False
+# Data file (in-app directory; streamlit cloud allowed)
+DATA_FILE = "echosoul_data.json"
 
-try:
-    import nltk
-    _HAS_NLTK = True
-except Exception:
-    _HAS_NLTK = False
+# -------------------------
+# Utilities: storage / timestamps
+# -------------------------
+def ts_now():
+    return datetime.datetime.utcnow().isoformat() + "Z"
 
-try:
-    from cryptography.fernet import Fernet
-    _HAS_CRYPTO = True
-except Exception:
-    _HAS_CRYPTO = False
+def default_data():
+    return {
+        "profile": {
+            "name": "",
+            "created": ts_now(),
+            "persona": {"tone": "friendly", "style": "casual"}
+        },
+        "timeline": [],
+        "vault": [],
+        "conversations": []
+    }
 
-# streamlit-webrtc is optional for browser-based mic; we'll gracefully fall back to file upload
-try:
-    import streamlit_webrtc  # type: ignore
-    _HAS_STREAMLIT_WEBRTC = True
-except Exception:
-    _HAS_STREAMLIT_WEBRTC = False
-
-# helper: load .env locally if present (but don't rely on it in production)
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
-except Exception:
-    pass
-
-# ------------------------------------------------------------
-# Config & secrets
-# ------------------------------------------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-AGORA_APP_ID = os.getenv("AGORA_APP_ID")
-AGORA_APP_CERTIFICATE = os.getenv("AGORA_APP_CERTIFICATE")
-
-# Create OpenAI client if possible
-openai_client = None
-if _HAS_OPENAI and OPENAI_API_KEY:
+def load_data() -> dict:
+    if not os.path.exists(DATA_FILE):
+        d = default_data()
+        save_data(d)
+        return d
     try:
-        openai_client = OpenAI(api_key=OPENAI_API_KEY)
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        openai_client = None
+        # corrupt or unreadable: reset to default
+        d = default_data()
+        save_data(d)
+        return d
 
-# ------------------------------------------------------------
-# Utility functions
-# ------------------------------------------------------------
-def safe_extract_keywords(text: str, top_n: int = 6) -> List[str]:
-    """
-    Extract keywords from text with best available method:
-      - spacy (if installed)
-      - textblob noun phrases (if installed)
-      - fallback: short unique tokens with simple heuristics
-    """
-    text = (text or "").strip()
-    if not text:
-        return []
+def save_data(data: dict):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-    # Use spaCy if available and has a model loaded
-    if _HAS_SPACY:
-        try:
-            # we don't call spacy.load("en_core_web_sm") automatically because the model
-            # may not be installed. Try to use default spaCy pipeline.
-            nlp = spacy.blank("en") if "en_core_web_sm" not in spacy.util.get_installed_models() else spacy.load("en_core_web_sm")
-            doc = nlp(text)
-            candidates = [chunk.text.lower() for chunk in doc.noun_chunks]
-            # fallback to tokens if noun_chunks empty
-            if not candidates:
-                candidates = [t.text.lower() for t in doc if not t.is_stop and t.is_alpha]
-            # dedupe preserving order
-            seen = set()
-            out = []
-            for c in candidates:
-                if c not in seen:
-                    seen.add(c)
-                    out.append(c)
-            return out[:top_n]
-        except Exception:
-            pass
+# -------------------------
+# Encryption utilities (vault)
+# -------------------------
 
-    # Use TextBlob noun phrases
-    if _HAS_TEXTBLOB:
-        try:
-            tb = TextBlob(text)
-            phrases = [p.lower() for p in tb.noun_phrases]
-            return phrases[:top_n]
-        except Exception:
-            pass
-
-    # Simple regex/token fallback
-    tokens = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
-    freq = {}
-    for t in tokens:
-        freq[t] = freq.get(t, 0) + 1
-    # sort by frequency then length
-    sorted_tokens = sorted(freq.items(), key=lambda kv: (-kv[1], -len(kv[0])))
-    return [t for t, _ in sorted_tokens[:top_n]]
-
-def openai_chat_reply(user_text: str, system_prompt: str = "You are EchoSoul, an adaptive AI companion.", history: List[Dict] = None, model: str = "gpt-3.5-turbo") -> str:
-    """
-    Use the new OpenAI client (openai.OpenAI) chat completions API format.
-    Falls back gracefully if client not available.
-    """
-    if not user_text:
-        return ""
-    if openai_client is None:
-        return "OpenAI client not configured. Please set OPENAI_API_KEY in your environment."
-
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": system_prompt})
-    # include history as previous user/assistant messages if given
-    if history:
-        for m in history:
-            # each history item should be a dict with role/content
-            if m.get("role") and m.get("content"):
-                messages.append({"role": m["role"], "content": m["content"]})
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        # new client: client.chat.completions.create(...)
-        response = openai_client.chat.completions.create(model=model, messages=messages)
-        # response.choices[0].message.content
-        choice = response.choices[0]
-        msg = getattr(choice, "message", None)
-        if msg:
-            return getattr(msg, "content", str(choice))
-        # fallback if attributes different
-        return str(choice)
-    except Exception as e:
-        # return friendly message to user
-        return f"Error calling OpenAI chat completion: {e}"
-
-# Simple vault encryption (optional)
-def make_fernet_key_from_password(password: str) -> bytes:
-    # Very simple key derivation for demo only: do NOT use for production secret management
-    # We hash and use base64 urlsafe as Fernet key
+# Fernet helper (generate a wrapping key using password)
+def _fernet_from_password(password: str) -> Fernet:
+    # Derive deterministic 32-byte key from password using SHA256, then base64
     import hashlib, base64
-    h = hashlib.sha256(password.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(h)
+    key = hashlib.sha256(password.encode("utf-8")).digest()
+    key_b64 = base64.urlsafe_b64encode(key)
+    return Fernet(key_b64)
 
-def encrypt_text(plain: str, password: str) -> Optional[str]:
-    if not _HAS_CRYPTO:
-        return None
+def encrypt_text(password: str, plaintext: str) -> str:
+    if CRYPTO_AVAILABLE:
+        f = _fernet_from_password(password)
+        token = f.encrypt(plaintext.encode("utf-8"))
+        return base64.b64encode(token).decode("utf-8")  # store base64 to be safe
+    # fallback XOR-ish (not secure) — only for demo
+    b = plaintext.encode("utf-8")
+    key = hashlib.sha256(password.encode("utf-8")).digest()
+    out = bytes([b[i] ^ key[i % len(key)] for i in range(len(b))])
+    return base64.b64encode(out).decode("utf-8")
+
+def decrypt_text(password: str, cipher_b64: str) -> typing.Optional[str]:
     try:
-        key = make_fernet_key_from_password(password)
-        f = Fernet(key)
-        token = f.encrypt(plain.encode("utf-8"))
-        return token.decode("utf-8")
+        raw = base64.b64decode(cipher_b64.encode("utf-8"))
+    except Exception:
+        return None
+    if CRYPTO_AVAILABLE:
+        try:
+            f = _fernet_from_password(password)
+            pt = f.decrypt(raw)
+            return pt.decode("utf-8")
+        except Exception:
+            return None
+    # fallback XOR decode
+    key = hashlib.sha256(password.encode("utf-8")).digest()
+    try:
+        out = bytes([raw[i] ^ key[i % len(key)] for i in range(len(raw))])
+        return out.decode("utf-8")
     except Exception:
         return None
 
-def decrypt_text(token_str: str, password: str) -> Optional[str]:
-    if not _HAS_CRYPTO:
-        return None
-    try:
-        key = make_fernet_key_from_password(password)
-        f = Fernet(key)
-        raw = f.decrypt(token_str.encode("utf-8"))
-        return raw.decode("utf-8")
-    except Exception:
-        return None
+# -------------------------
+# Simple sentiment (heuristic) — used to adapt persona
+# -------------------------
+POS_WORDS = set("good great happy love excellent amazing wonderful nice grateful fun delighted excited calm optimistic".split())
+NEG_WORDS = set("bad sad angry depressed unhappy terrible awful hate lonely anxious stressed worried frustrated".split())
 
-# Audio transcription via OpenAI audio endpoint (best-effort)
-def transcribe_audio_file(file_bytes: bytes, filename: str = "upload.wav", model: str = "whisper-1") -> str:
-    """
-    Transcribe audio bytes using OpenAI audio endpoint if available.
-    This uses the new client model; if unavailable, returns a helpful message.
-    """
-    if openai_client is None:
-        return "OpenAI client not available to transcribe audio. Set OPENAI_API_KEY."
+def sentiment_score(text: str) -> float:
+    toks = re.findall(r"\w+", text.lower())
+    pos = sum(1 for t in toks if t in POS_WORDS)
+    neg = sum(1 for t in toks if t in NEG_WORDS)
+    score = pos - neg
+    norm = score / max(1, len(toks))
+    return norm
+
+def sentiment_label(score: float) -> str:
+    if score > 0.06:
+        return "positive"
+    if score < -0.06:
+        return "negative"
+    return "neutral"
+
+def update_persona_based_on_sentiment(data: dict, score: float):
+    if not data.get("profile"):
+        return
+    if score < -0.06:
+        data["profile"]["persona"]["tone"] = "empathetic"
+    elif score > 0.06:
+        data["profile"]["persona"]["tone"] = "energetic"
+    else:
+        data["profile"]["persona"]["tone"] = "friendly"
+    save_data(data)
+
+# -------------------------
+# Memory helpers
+# -------------------------
+def add_memory(data: dict, title: str, content: str):
+    item = {
+        "id": hashlib.sha1((title + content + ts_now()).encode("utf-8")).hexdigest(),
+        "title": title,
+        "content": content,
+        "timestamp": ts_now()
+    }
+    data["timeline"].append(item)
+    save_data(data)
+    return item
+
+def search_timeline(data: dict, query: str, limit: int = 20):
+    q = query.lower()
+    results = [m for m in reversed(data["timeline"]) if q in (m["title"] + " " + m["content"]).lower()]
+    return results[:limit]
+
+def find_relevant_memories(data: dict, text: str, limit: int = 3):
+    txt = text.lower()
+    found = []
+    for item in reversed(data["timeline"]):
+        if any(w in txt for w in re.findall(r"\w+", item["content"].lower())) or any(w in txt for w in re.findall(r"\w+", item["title"].lower())):
+            found.append(item)
+            if len(found) >= limit:
+                break
+    return found
+
+# -------------------------
+# GPT integration (generate reply)
+# -------------------------
+def generate_reply(data: dict, user_msg: str, use_memories: bool = True) -> str:
+    # sentiment + persona update
+    s = sentiment_score(user_msg)
+    update_persona_based_on_sentiment(data, s)
+    persona_tone = data["profile"].get("persona", {}).get("tone", "friendly")
+
+    # build memory context
+    mem_items = data.get("timeline", [])[-5:] if use_memories else []
+    mem_text = "\n".join([f"- {m['title']}: {m['content']}" for m in mem_items]) or "No memories yet."
+
+    # detect if user asks to "act like me"
+    low = user_msg.lower()
+    act_like_me = any(phrase in low for phrase in ["act like me", "be me", "reply like me", "speak like me", "roleplay as me"])
+
+    # system prompt
+    system_prompt_lines = [
+        f"You are EchoSoul — a warm, evolving personal companion for {data['profile'].get('name', 'User')}.",
+        f"Personality tone: {persona_tone}. Style: {data['profile'].get('persona',{}).get('style','casual')}.",
+        "You should be empathetic, concise, and reflective. Use the user's name when appropriate.",
+        "",
+        "Memory context (most recent items):",
+        mem_text,
+        "",
+        "Behavior rules:",
+        "- If the user asks you to 'act like me' or similar, roleplay as the user and answer in first-person as if you are them.",
+        "- If the user asks a direct question, answer helpfully and clearly.",
+        "- Ask gentle follow-up questions when a response could benefit from more detail.",
+        "- Keep responses relatively brief (1-6 sentences) unless asked for longer."
+    ]
+    system_prompt = "\n".join(system_prompt_lines)
+
+    # user messages: include special instruction if acting like user
+    user_content = user_msg
+    if act_like_me:
+        user_content = "(User asked: act like them.) " + user_msg
 
     try:
-        # The new client exposes audio transcriptions on client.audio.transcriptions.create
-        # This will only work if the installed openai package exposes that API.
-        # We'll try best-effort and catch errors.
-        import io
-        audio_file = io.BytesIO(file_bytes)
-        # Some installed clients accept 'file' named parameter; this may vary across versions.
-        resp = openai_client.audio.transcriptions.create(model=model, file=audio_file)
-        # Many responses have text
-        text = getattr(resp, "text", None) or resp.get("text") if isinstance(resp, dict) else None
-        if text:
-            return text
-        # fallback: try to stringify resp
-        return str(resp)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content}
+            ],
+            max_tokens=500
+        )
+        # extract text
+        reply = resp.choices[0].message.content.strip()
     except Exception as e:
-        return f"Audio transcription failed: {e}"
+        # fallback simple reply if API errors
+        reply = "Sorry — I'm having trouble connecting to my AI brain right now. I still remember what you said: " + user_msg
 
-# ------------------------------------------------------------
+    # save conversation
+    data.setdefault("conversations", []).append({"user": user_msg, "bot": reply, "ts": ts_now()})
+    save_data(data)
+    return reply
+
+# -------------------------
 # Streamlit UI
-# ------------------------------------------------------------
-st.set_page_config(page_title="EchoSoul", layout="wide")
-st.title("🌙 EchoSoul — your adaptive AI companion")
+# -------------------------
+st.set_page_config(page_title="EchoSoul", layout="centered")
 
-# Sidebar: mode, environment debug toggle
+st.title("EchoSoul — Your evolving companion")
+
+data = load_data()
+
+# Sidebar settings
 with st.sidebar:
-    st.header("EchoSoul")
-    mode = st.radio("Mode", ["Chat", "Chat history", "Life timeline", "Vault", "Call", "About"], index=0)
-    show_env = st.checkbox("Show env debug (hide keys)", value=False)
-    if show_env:
-        st.subheader("Environment (masked)")
-        def mask(v):
-            if not v:
-                return "<not set>"
-            s = str(v)
-            if len(s) <= 6:
-                return "*" * len(s)
-            return s[:3] + "*" * (len(s) - 6) + s[-3:]
-        st.write("OPENAI_API_KEY:", mask(OPENAI_API_KEY))
-        st.write("AGORA_APP_ID:", mask(AGORA_APP_ID))
-        st.write("AGORA_APP_CERT:", mask(AGORA_APP_CERT))
+    st.header("Settings")
+    name = st.text_input("Your name", value=data["profile"].get("name", ""))
+    if st.button("Save profile name"):
+        data["profile"]["name"] = name.strip() or data["profile"].get("name","")
+        save_data(data)
+        st.success("Profile saved.")
+    st.markdown("---")
+    st.markdown("Vault settings (password not saved):")
+    vault_password = st.text_input("Vault password (used to encrypt/decrypt)", type="password")
+    if CRYPTO_AVAILABLE:
+        st.caption("Using secure Fernet encryption.")
+    else:
+        st.caption("Cryptography not available; using demo fallback (not secure).")
+    st.markdown("---")
+    st.checkbox("Enable adaptive persona (sentiment influences tone)", value=True, key="adaptive_toggle")
+    st.markdown("---")
+    st.write("Data file:", DATA_FILE)
+    st.markdown("If you want a fresh start, you can reset data below.")
+    if st.button("Reset all EchoSoul data"):
+        save_data(default_data())
+        st.success("Data reset. Refresh the app.")
 
-# Initialize session state
-if "history" not in st.session_state:
-    st.session_state.history = []  # list of dicts {"role": "user"/"assistant", "content": "..."}
-if "vault" not in st.session_state:
-    st.session_state.vault = {}  # simple key->encrypted value
-if "system_prompt" not in st.session_state:
-    st.session_state.system_prompt = "You are EchoSoul, an adaptive AI companion."
+# Main tabs
+tab = st.radio("", ["Chat", "Life Timeline", "Private Vault", "Legacy & Export", "About"])
 
-# Helper UI bits
-def append_history(role: str, content: str):
-    st.session_state.history.append({"role": role, "content": content})
+if tab == "Chat":
+    st.subheader("Chat with EchoSoul")
+    # show name
+    st.markdown(f"**You:** {data['profile'].get('name','(no name)')}")
 
-# Main: Chat
-if mode == "Chat":
-    st.subheader("💬 Chat with EchoSoul")
-    user_input = st.text_area("Your message", height=150, value="", placeholder="Share your thoughts...")
-    c1, c2 = st.columns([1, 3])
-    with c1:
+    # conversation display
+    convs = data.get("conversations", [])
+    for c in convs[-30:]:
+        st.markdown(f"**You:** {c['user']}")
+        st.markdown(f"**EchoSoul:** {c['bot']}")
+        st.markdown("---")
+
+    user_input = st.text_input("Say something to EchoSoul", key="chat_input")
+    col1, col2, col3 = st.columns([1,1,1])
+    with col1:
         if st.button("Send"):
             if not user_input.strip():
-                st.warning("Please write a message before sending.")
+                st.warning("Type something first.")
             else:
-                append_history("user", user_input)
-                with st.spinner("Thinking..."):
-                    reply = openai_chat_reply(user_input, system_prompt=st.session_state.system_prompt, history=st.session_state.history[-10:])
-                append_history("assistant", reply)
-                st.experimental_rerun()
-    with c2:
-        st.markdown("**Conversation**")
-        for m in st.session_state.history:
-            if m["role"] == "user":
-                st.markdown(f"**You:** {m['content']}")
-            else:
-                st.markdown(f"**EchoSoul:** {m['content']}")
-
-# Chat history view
-elif mode == "Chat history":
-    st.subheader("🗂️ Chat history")
-    st.write("Saved messages in session (not persisted).")
-    for idx, m in enumerate(st.session_state.history):
-        st.write(f"{idx+1}. [{m['role']}] {m['content'][:400]}")
-
-# Life timeline (simple placeholder)
-elif mode == "Life timeline":
-    st.subheader("🕰️ Life timeline")
-    st.info("This feature would show memory timeline items. For demo it uses chat 'assistant' messages as timeline items.")
-    timeline_items = [m for m in st.session_state.history if m["role"] == "assistant"]
-    for t in timeline_items[-20:]:
-        st.write(f"- {t['content']}")
-
-# Vault: store encrypted notes (optional: cryptography)
-elif mode == "Vault":
-    st.subheader("🔐 Vault (encrypted notes)")
-    if not _HAS_CRYPTO:
-        st.warning("Vault requires the 'cryptography' package. The app can store plaintext in session but encryption isn't available.")
-    pwd = st.text_input("Vault password (used to encrypt/decrypt) — keep safe", type="password")
-    key = st.text_input("Note key (identifier)", value="")
-    note = st.text_area("Note to store", value="", height=120)
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Save note"):
-            if not key:
-                st.error("Please enter a note key.")
-            else:
-                if _HAS_CRYPTO and pwd:
-                    enc = encrypt_text(note, pwd)
-                    if enc is None:
-                        st.error("Encryption failed.")
-                    else:
-                        st.session_state.vault[key] = {"enc": enc}
-                        st.success(f"Saved encrypted note as '{key}'")
-                else:
-                    # fallback store plaintext
-                    st.session_state.vault[key] = {"plain": note}
-                    st.success(f"Saved plaintext note as '{key}'")
+                reply = generate_reply(data, user_input.strip(), use_memories=True)
+                st.success("Reply generated.")
+                # show new reply inline
+                st.markdown(f"**You:** {user_input}")
+                st.markdown(f"**EchoSoul:** {reply}")
     with col2:
-        if st.button("List notes"):
-            st.write(list(st.session_state.vault.keys()))
-        if st.button("Clear vault (session only)"):
-            st.session_state.vault = {}
-            st.success("Vault cleared (session).")
-    st.markdown("---")
-    st.write("Retrieve note")
-    retrieve_key = st.text_input("Key to retrieve")
-    if st.button("Get note"):
-        if retrieve_key in st.session_state.vault:
-            entry = st.session_state.vault[retrieve_key]
-            if "enc" in entry:
-                if not pwd:
-                    st.error("This note is encrypted. Provide the vault password to decrypt.")
-                else:
-                    dec = decrypt_text(entry["enc"], pwd)
-                    if dec is None:
-                        st.error("Decryption failed (wrong password?).")
-                    else:
-                        st.text_area("Decrypted note", dec, height=200)
+        if st.button("Add to timeline"):
+            if not user_input.strip():
+                st.warning("Type the memory content in the box first.")
             else:
-                st.text_area("Note (plaintext)", entry.get("plain", ""), height=200)
+                add_memory(data, "User added memory", user_input.strip())
+                st.success("Memory saved to timeline.")
+    with col3:
+        if st.button("Save as fact (short)"):
+            text = user_input.strip()
+            if not text:
+                st.warning("Type something first.")
+            else:
+                # detect "I am ...", "I like ..."
+                m = re.search(r"\bi (?:am|was|feel|like|love)\s+(.+)", text.lower())
+                if m:
+                    fact = m.group(1).strip().capitalize()
+                    add_memory(data, "Personal note", fact)
+                    st.success(f"Saved fact: {fact}")
+                else:
+                    add_memory(data, "Short note", text[:200])
+                    st.success("Saved short note.")
+
+if tab == "Life Timeline":
+    st.subheader("Life Timeline — add, view, search")
+    st.markdown("Add a memory or browse/search your timeline.")
+    with st.form("add_memory_form"):
+        ttitle = st.text_input("Title", value="Memory")
+        tcontent = st.text_area("Content")
+        submitted = st.form_submit_button("Save Memory")
+        if submitted:
+            if not tcontent.strip():
+                st.warning("Content cannot be empty.")
+            else:
+                add_memory(data, ttitle.strip() or "Memory", tcontent.strip())
+                st.success("Memory saved.")
+
+    st.markdown("### Recent memories")
+    for item in sorted(data["timeline"], key=lambda x: x["timestamp"], reverse=True)[:30]:
+        st.markdown(f"**{item['title']}** — {item['timestamp']}")
+        st.write(item["content"])
+        st.markdown("---")
+
+    st.markdown("### Search timeline")
+    q = st.text_input("Search query", key="timeline_search")
+    if q.strip():
+        results = search_timeline(data, q.strip())
+        st.markdown(f"Found {len(results)} results (showing up to 20).")
+        for r in results:
+            st.markdown(f"**{r['title']}** — {r['timestamp']}")
+            st.write(r["content"])
+            st.markdown("---")
+
+if tab == "Private Vault":
+    st.subheader("Private Vault (encrypted notes)")
+    st.write("Vault items remain encrypted. You must provide the same password to decrypt them.")
+    if not data.get("vault"):
+        st.info("Vault is empty.")
+
+    # show vault items (titles only, decrypt when password provided)
+    for idx, v in enumerate(data.get("vault", [])):
+        st.markdown(f"**{v.get('title','Vault item')}** — {v.get('timestamp')}")
+        if vault_password:
+            decrypted = decrypt_text(vault_password, v.get("cipher",""))
+            if decrypted is None:
+                st.write("*Unable to decrypt with this password.*")
+            else:
+                st.write(decrypted)
         else:
-            st.warning("No note by that key in session vault.")
+            st.write("*Provide password in sidebar to view.*")
+        st.markdown("---")
 
-# Call (voice) mode: best-effort
-elif mode == "Call":
-    st.subheader("📞 Live Voice Chat")
-    st.info("Grant microphone permission in your browser. If WebRTC support isn't available, you can upload audio files for transcription.")
-    mic_supported = _HAS_STREAMLIT_WEBRTC
-    if mic_supported:
-        st.success("streamlit-webrtc available: browser-based mic capture may work.")
-    else:
-        st.warning("streamlit-webrtc not installed — fallback to upload.")
+    st.markdown("Add a new vault item")
+    vt = st.text_input("Title for vault item", key="vt")
+    vc = st.text_area("Secret content", key="vc")
+    if st.button("Save to vault"):
+        if not vault_password:
+            st.warning("Set a vault password in the sidebar first.")
+        elif not vc.strip():
+            st.warning("Secret content cannot be empty.")
+        else:
+            cipher = encrypt_text(vault_password, vc.strip())
+            data.setdefault("vault", []).append({"title": vt or "Vault item", "cipher": cipher, "timestamp": ts_now()})
+            save_data(data)
+            st.success("Saved to vault (encrypted).")
 
-    st.markdown("**Upload audio file to transcribe**")
-    uploaded = st.file_uploader("Upload WAV/MP3/OGG", type=["wav", "mp3", "ogg", "m4a"])
-    if uploaded is not None:
-        try:
-            b = uploaded.read()
-            st.info("Sending audio to transcription (best-effort). This may take a few seconds.")
-            transcription = transcribe_audio_file(b, filename=uploaded.name)
-            st.success("Transcription result:")
-            st.write(transcription)
-            # optionally send transcription to chat
-            if st.button("Send transcription as user message"):
-                append_history("user", transcription)
-                with st.spinner("Generating reply..."):
-                    reply = openai_chat_reply(transcription, system_prompt=st.session_state.system_prompt, history=st.session_state.history[-10:])
-                append_history("assistant", reply)
-                st.success("Reply saved to session conversation.")
-        except Exception as e:
-            st.error(f"Failed to read or transcribe uploaded file: {e}")
+if tab == "Legacy & Export":
+    st.subheader("Legacy & Export")
+    st.write("Export your data or produce a human-readable snapshot.")
+    # Download full JSON
+    if st.button("Download full export (JSON)"):
+        st.download_button("Click to download JSON", json.dumps(data, indent=2), f"echosoul_export_{datetime.datetime.utcnow().date()}.json", "application/json")
+    st.markdown("---")
+    st.write("Legacy snapshot (human-readable timeline):")
+    legacy_lines = [f"{it['timestamp']}: {it['title']} — {it['content']}" for it in data.get("timeline",[])]
+    legacy_text = "\n\n".join(legacy_lines)
+    st.text_area("Legacy snapshot", value=legacy_text, height=300)
 
-    st.markdown("**Live mic / WebRTC (if supported)**")
-    if _HAS_STREAMLIT_WEBRTC:
-        st.info("If streamlit-webrtc is installed we could run a small recorder. For safety and stability on free hosts we avoid creating a persistent webRTC server here.")
-        st.write("If you need fully interactive WebRTC voice, consider using a dedicated client-side implementation or deploy to a paid instance.")
-    else:
-        st.info("Install `streamlit-webrtc` locally to test browser mic; Render may not support persistent webRTC easily on free plans.")
+if tab == "About":
+    st.header("About EchoSoul (full version)")
+    st.write("This app runs a GPT model as the brain, stores memories in a timeline, keeps a private vault, and can export your data. It adapts tone based on sentiment and can roleplay as you when asked.")
+    st.markdown("**Notes & safety:**")
+    st.markdown("- Vault uses strong encryption (Fernet) when 'cryptography' is available; otherwise a demo fallback is used — do not store real secrets without verifying encryption availability.")
+    st.markdown("- Your OpenAI API key must be configured in Streamlit Secrets as `OPENAI_API_KEY`.")
+    st.markdown("- This is still a prototype. For stronger privacy guarantees, add server-side encryption and a secure key manager.")
 
-# About
-elif mode == "About":
-    st.header("About EchoSoul")
-    st.markdown(
-        """
-        EchoSoul is a demo adaptive AI companion built with Streamlit and OpenAI.
-        This app:
-        - Uses the new OpenAI client API (`openai>=1.0.0`) via `OpenAI`.
-        - Degrades gracefully if optional heavy libraries are missing.
-        - Requires `OPENAI_API_KEY` to be set as an environment variable (in Render / Railway UI).
-        """
-    )
-    st.markdown("**Troubleshooting tips**")
-    st.markdown(
-        "- If you see `You tried to access openai.ChatCompletion` error: update your code to the new OpenAI client (this app uses it).\n"
-        "- If you see `Permission denied` on call: grant mic permissions in the browser (click lock icon near the URL).\n"
-        "- If audio or packages fail during deploy: ensure your `requirements.txt` pins versions compatible with your Python runtime."
-    )
-
-# Brain mimic / keyword diagnostics panel (below main UI)
-st.sidebar.markdown("---")
-st.sidebar.subheader("Brain mimic tools")
-sample_text = st.sidebar.text_area("Sample text for keyword extraction (brain mimic)", value="I love hiking near the sea and writing songs about memories.", height=80)
-if st.sidebar.button("Extract keywords from sample"):
-    kw = safe_extract_keywords(sample_text, top_n=8)
-    st.sidebar.write("Keywords:", kw)
-
-# small footer info
-st.markdown("---")
-st.caption("EchoSoul — demo. Keep your OPENAI_API_KEY secret. This app stores session data in memory only and does not persist chat history by default.")
-if __name__ == "__main__":
-    import os
-    port = int(os.environ.get("PORT", 10000))
-  
+# End of file
