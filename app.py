@@ -20,7 +20,7 @@ from typing import Optional, Dict, Any
 
 import streamlit as st
 from textblob import TextBlob
-import openai  # ✅ fixed import
+from openai import OpenAI   # ✅ fixed import (new API)
 
 # Optional spaCy (if available)
 try:
@@ -29,7 +29,6 @@ try:
     try:
         nlp = spacy.load("en_core_web_sm")
     except Exception:
-        # model may be missing at runtime; set nlp to None gracefully
         nlp = None
 except Exception:
     nlp = None
@@ -49,7 +48,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ECHOSOUL_KEY = os.getenv("ECHOSOUL_KEY")  # Fernet key (base64)
 DB_PATH = os.getenv("ECHOSOUL_DB", "echosoul.db")
 
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)   # ✅ new client
 
 # ----------------------
 # Encryption helper (Fernet)
@@ -173,9 +172,14 @@ def call_openai_chat(messages: list, max_tokens: int = 300):
         return False, "OpenAI API key not configured (OPENAI_API_KEY)."
 
     try:
-        resp = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages, max_tokens=max_tokens, temperature=0.8)
-        return True, resp.choices[0].message["content"].strip()
-    except Exception as e:  # ✅ fixed exception handling
+        resp = client.chat.completions.create(   # ✅ new API
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.8
+        )
+        return True, resp.choices[0].message.content.strip()  # ✅ new format
+    except Exception as e:
         return False, f"OpenAI error: {str(e)}"
 
 
@@ -209,7 +213,7 @@ st.title("EchoSoul — adaptive, memoryful AI companion")
 
 # Session state init
 if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = []  # list of messages: {"role":"user|echo|system", "text":..., "time":...}
+    st.session_state["chat_history"] = []
 
 if "profile" not in st.session_state:
     st.session_state["profile"] = {"name": "", "tone": "warm", "persona": "A supportive companion."}
@@ -252,7 +256,7 @@ with tabs[0]:
     with col2:
         mem_title = st.text_input("Memory title", value=f"Memory {datetime.utcnow().date()}", key="mem_title")
     with col3:
-        st.write("")  # spacer
+        st.write("")
         send = st.button("Send to EchoSoul", type="primary")
 
     if send:
@@ -260,7 +264,6 @@ with tabs[0]:
             st.session_state["chat_input"] = user_text
             analysis = analyze_text_nlp(user_text)
 
-            # build context from recent memories
             recent = list_memories_db(limit=6)
             ctx = ""
             for m in recent:
@@ -282,7 +285,6 @@ with tabs[0]:
                 except Exception as e:
                     st.session_state["chat_history"].append({"role": "system", "text": f"Save error: {e}", "time": datetime.utcnow().isoformat()})
 
-            # Clear input and rerun so widget resets visually
             st.session_state["chat_input"] = ""
             st.rerun()
 
@@ -391,7 +393,6 @@ with tabs[6]:
     else:
         class SimpleAudioProcessor(AudioProcessorBase):
             def recv(self, frame):
-                # placeholder for audio processing / emotion detection
                 return frame
 
         webrtc_streamer(key="echosoul_live", audio_processor_factory=SimpleAudioProcessor)
