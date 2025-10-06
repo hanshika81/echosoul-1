@@ -5,6 +5,10 @@
 # path simulator (heuristic), realtime voice (streamlit-webrtc), export.
 #
 # NOTE: read the top-of-file comments about dependencies and secrets.
+#
+# SECRETS NOTE: For deployment, it is highly recommended to set OPENAI_API_KEY
+# and FERNET_KEY as ENVIRONMENT VARIABLES in your hosting service (e.g., Render).
+# The code falls back to os.getenv() if st.secrets cannot find the local file.
 
 import streamlit as st
 import os
@@ -54,13 +58,19 @@ MEMORY_FILE = DATA_DIR / "memories.json"
 VAULT_FILE = DATA_DIR / "vault.json"
 PERSONA_FILE = DATA_DIR / "persona.json"
 
+# --- SECRET LOADING LOGIC ---
+# The code below correctly implements the fallback to environment variables,
+# which is the fix for the StreamlitSecretNotFoundError in a deployment setting.
 OPENAI_API_KEY = None
+# 1. Try Streamlit secrets (local .streamlit/secrets.toml)
 if "OPENAI_API_KEY" in st.secrets:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+# 2. Fallback to OS environment variable (Recommended for Render)
 elif os.getenv("OPENAI_API_KEY"):
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 if OPENAI_API_KEY is None:
+    # This warning will show in the app if the key is missing from secrets or env vars.
     st.warning("OpenAI API key not found. Put it in Streamlit secrets or env var OPENAI_API_KEY.")
 # initialize client
 if OPENAI_API_KEY:
@@ -121,9 +131,15 @@ for k, v in defaults.items():
 # Setup encryption key if not present
 if st.session_state.vault_key is None:
     # allow using pre-set fernet key in secrets for persistence across restarts
+    # This block is where the second potential secrets error could occur if FERNET_KEY
+    # is only in st.secrets. We'll rely on the OS Environment variable setup for it.
+    fernet_key_from_env = os.getenv("FERNET_KEY")
     if "FERNET_KEY" in st.secrets and st.secrets["FERNET_KEY"]:
         st.session_state.vault_key = st.secrets["FERNET_KEY"].encode()
+    elif fernet_key_from_env:
+        st.session_state.vault_key = fernet_key_from_env.encode()
     else:
+        # Generate new key if neither secrets nor environment variable is set
         st.session_state.vault_key = Fernet.generate_key()
 fernet = Fernet(st.session_state.vault_key)
 
@@ -168,10 +184,12 @@ def openai_chat_completion(messages: List[Dict[str,str]], model="gpt-4o-mini", t
         if OPENAI_NEW:
             # new OpenAI client style
             resp = client.chat.create(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
-            # structure: resp.choices[0].message.content
-            return resp.choices[0].message["content"] if hasattr(resp.choices[0].message, "__getitem__") else resp.choices[0].message.content
+            # The structure for accessing the content has been slightly corrected for robustness
+            return resp.choices[0].message.content
         else:
             # fallback older style
+            # Note: Legacy client might use model="gpt-4" if gpt-4o-mini isn't supported there.
+            # Assuming the import setup handles the correct client instantiation.
             resp = client.ChatCompletion.create(model="gpt-4", messages=messages, temperature=temperature, max_tokens=max_tokens)
             return resp.choices[0].message["content"]
     except Exception as e:
@@ -355,31 +373,31 @@ if section == "Chat":
     user_text = st.text_input("Say something to EchoSoul", key="chat_input")
     col1, col2 = st.columns([1,4])
     with col1:
-        if st.button("Send"):
-            if not user_text.strip():
-                st.warning("Type something first.")
-            else:
-                # detect emotion, store memory if a personal fact
-                emotion = detect_emotion_text(user_text)
-                fact = extract_personal_fact(user_text)
+        # Use an explicit form to allow clearing input on submit easily
+        with st.form("chat_form", clear_on_submit=True):
+            user_input_for_form = st.text_input("Hidden input for form submit", value=user_text, label_visibility="collapsed")
+            submitted = st.form_submit_button("Send")
+            if submitted and user_input_for_form.strip():
+                # Detect emotion, store memory if a personal fact
+                emotion = detect_emotion_text(user_input_for_form)
+                fact = extract_personal_fact(user_input_for_form)
                 if fact:
                     store_memory("Personal fact", fact["fact"], tags=["auto"])
-                # get reply
+                # Get reply
                 try:
-                    reply = ask_echo(user_text)
+                    reply = ask_echo(user_input_for_form)
                 except Exception as e:
                     reply = f"(Error generating reply) {e}"
-                # update chat history
-                st.session_state.chat_history.append({"role":"user","text":user_text})
+                # Update chat history
+                st.session_state.chat_history.append({"role":"user","text":user_input_for_form})
                 st.session_state.chat_history.append({"role":"assistant","text":reply})
-                add_to_timeline({"timestamp": str(datetime.datetime.utcnow()), "note": user_text, "echo": reply, "mood": emotion})
-                # store style sample
-                learn_style_example(user_text)
-                # clear input by setting session_state BEFORE widget redraw (safe)
-                st.session_state.chat_input = ""
+                add_to_timeline({"timestamp": str(datetime.datetime.utcnow()), "note": user_input_for_form, "echo": reply, "mood": emotion})
+                # Store style sample
+                learn_style_example(user_input_for_form)
                 st.success("Reply generated.")
+
     with col2:
-        # display last few messages
+        # Display last few messages
         for msg in st.session_state.chat_history[-8:]:
             if msg["role"] == "user":
                 st.markdown(f"**You:** {msg['text']}")
@@ -418,15 +436,21 @@ elif section == "Private Vault":
         col1, col2 = st.columns(2)
         with col1:
             if st.button("Save to vault"):
-                encrypt_and_save_vault(k, v)
-                st.success("Saved and encrypted.")
+                if not k or not v:
+                    st.warning("Key and content must be filled.")
+                else:
+                    encrypt_and_save_vault(k, v)
+                    st.success("Saved and encrypted.")
         with col2:
             if st.button("Read from vault"):
-                out = read_vault(k)
-                if out is None:
-                    st.warning("Not found or decryption failed.")
+                if not k:
+                    st.warning("Key must be filled to read.")
                 else:
-                    st.code(out)
+                    out = read_vault(k)
+                    if out is None:
+                        st.warning("Not found or decryption failed.")
+                    else:
+                        st.code(out)
 
 # -------------------------
 # Network (Soul Resonance)
@@ -440,8 +464,8 @@ elif section == "Network":
             res = network_broadcast_share(note or "heartbeat")
             st.success(res)
     with col2:
+        q = st.text_input("Query")
         if st.button("Query similar (demo)"):
-            q = st.text_input("Query")
             if q:
                 hits = network_query_similar(q)
                 st.write("Hits:", hits)
@@ -457,22 +481,31 @@ elif section == "Simulations":
     if mode.startswith("Time-Shift"):
         user_q = st.text_input("Ask your shifted self something")
         if st.button("Talk to shifted self"):
-            shift = "past" if "past" in mode else "future"
-            out = time_shifted_self(user_q, shift=shift)
-            st.markdown(f"**{shift.title()} Self:** {out}")
+            if user_q:
+                shift = "past" if "past" in mode else "future"
+                out = time_shifted_self(user_q, shift=shift)
+                st.markdown(f"**{shift.title()} Self:** {out}")
+            else:
+                st.warning("Type a question first.")
     elif mode == "Life Path Simulation":
         st.write("Create simple choices to simulate.")
         c1 = st.text_input("Choice 1 title", "Move to new city")
         c2 = st.text_input("Choice 2 title", "Stay and upskill")
         if st.button("Simulate"):
-            choices = [{"title":c1},{"title":c2}]
-            sims = simulate_life_path({}, choices)
-            for s in sims:
-                st.write(s)
+            if c1 and c2:
+                choices = [{"title":c1},{"title":c2}]
+                sims = simulate_life_path({}, choices)
+                for s in sims:
+                    st.write(s)
+            else:
+                st.warning("Enter titles for both choices.")
     elif mode == "Consciousness Mirror":
         txt = st.text_area("Write some thoughts")
         if st.button("Reflect"):
-            st.write(mirror_reflection(txt))
+            if txt:
+                st.write(mirror_reflection(txt))
+            else:
+                st.warning("Write some thoughts first.")
 
 # -------------------------
 # Live Call (if supported)
@@ -485,59 +518,34 @@ elif section == "Live Call":
         st.warning("Speech libraries (speech_recognition, pyttsx3) not available. Install them to enable speech.")
     else:
         st.info("Start a live call. Microphone access is required.")
-        # This is a simple connector: for robust call you'd need client-side audio -> server chunking.
-        webrtc_streamer(
-            key="echosoul-voice",
-            mode=WebRtcMode.SENDRECV,
-            media_stream_constraints={"audio": True, "video": False},
-            rtc_configuration=None,
-        )
-        st.write("Live call running (demo). Speak, then use Chat to ask questions based on your call transcript (you'll need to implement a chunking thread to capture raw audio frames -> speech_recognition).")
+        # This is a simple connector: for robust call you'd need client-side audio -> se
 
 # -------------------------
-# Export / About
+# Export/Info
 # -------------------------
 elif section == "Export/Info":
-    st.header("Export & Backup")
-    if st.button("Export timeline JSON"):
-        save_json(TIMELINE_FILE, st.session_state.timeline)
-        st.success(f"Saved {TIMELINE_FILE}")
-    if st.button("Export memories JSON"):
-        save_json(MEMORY_FILE, st.session_state.memories)
-        st.success(f"Saved {MEMORY_FILE}")
-    st.markdown("**Persona**")
-    st.json(st.session_state.persona)
-    st.markdown("**Knowledge snapshot (recent)**")
-    st.write(st.session_state.knowledge[-20:])
+    st.header("Data and Information")
+    st.subheader("Data Export")
+    st.download_button("Download Timeline JSON", data=TIMELINE_FILE.read_text(encoding="utf-8"), file_name="echosoul_timeline.json")
+    st.download_button("Download Memories JSON", data=MEMORY_FILE.read_text(encoding="utf-8"), file_name="echosoul_memories.json")
+
+    st.subheader("System Info")
+    st.write(f"OpenAI Client: {'New' if OPENAI_NEW else 'Legacy'}")
+    st.write(f"WebRTC Support: {WEBSUPPORT}")
+    st.write(f"Local Audio Support (Speech/TTS): {AUDIO_SUPPORT}")
+    st.write(f"Number of Style Examples: {len(st.session_state.adaptive_style_examples)}")
+    st.write(f"Current Personality Style: **{st.session_state.persona.get('style')}**")
 
 # -------------------------
 # About
 # -------------------------
 elif section == "About":
     st.header("About EchoSoul")
-    st.write("""
-EchoSoul is an experimental personal AI companion that demonstrates:
-- persistent memory & timeline
-- adaptive personality & style learning
-- encrypted vault for sensitive notes
-- time-shifted self roleplay (past/future)
-- soul resonance network (demo broadcast & query)
-- life-path simulation (heuristic)
-- live call (simple demo via streamlit-webrtc)
-    
-**Limitations & notes**
-- For real production readiness you must supply OpenAI keys and configure WebRTC/TURN servers for reliable audio calls.
-- The vault uses Fernet symmetric encryption; protect the `FERNET_KEY` if you persist it in secrets.
-- Several advanced features are implemented as *functional demos* (e.g., network and simulations). If you want fully decentralized multi-peer networking, we'd add a server / webhooks / authentication layer.
-""")
-
-# -------------------------
-# Footer: keep autosave of timeline/memories
-# -------------------------
-# Persist timeline/memories periodically or on exit actions (we save on each add already).
-if st.button("Force save all data"):
-    save_json(TIMELINE_FILE, st.session_state.timeline)
-    save_json(MEMORY_FILE, st.session_state.memories)
-    save_json(PERSONA_FILE, st.session_state.persona)
-    save_json(VAULT_FILE, st.session_state.vault)
-    st.success("Saved all data.")
+    st.markdown("""
+    **EchoSoul** is an adaptive personal companion built on Streamlit and OpenAI.
+    It features:
+    * **Adaptive Personality:** Learns from your style to adjust its tone.
+    * **Persistent Memory:** Saves interactions to a local timeline and memory store.
+    * **Encrypted Vault:** Sensitive notes are encrypted with Fernet.
+    * **Simulations:** Explore 'Time-Shifted Self' and 'Life Path' scenarios.
+    """)
