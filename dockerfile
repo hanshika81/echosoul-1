@@ -30,3 +30,6 @@ EXPOSE 8501
 
 # Use environment PORT when provided by Render / Railway
 CMD ["streamlit", "run", "app.py", "--server.port=$PORT", "--server.address=0.0.0.0"]
+RUN pip install --no-cache-dir \
+    streamlit openai cryptography streamlit-webrtc av \
+    speechrecognition pyttsx3 numpy python-dotenv
