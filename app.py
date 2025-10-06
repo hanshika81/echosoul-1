@@ -1,173 +1,163 @@
 import os
 import sqlite3
+import streamlit as st
 from datetime import datetime
 from cryptography.fernet import Fernet
-import streamlit as st
 from textblob import TextBlob
 from openai import OpenAI
 
-# -----------------------
-# Setup
-# -----------------------
+# --- Setup ---
 st.set_page_config(page_title="EchoSoul AI", layout="wide")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ECHOSOUL_KEY = os.getenv("ECHOSOUL_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+ECHOSOUL_KEY = os.environ.get("ECHOSOUL_KEY", "")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Encryption
 cipher = Fernet(ECHOSOUL_KEY.encode()) if ECHOSOUL_KEY else None
 
-# SQLite setup
-conn = sqlite3.connect("echosoul_memories.db", check_same_thread=False)
+# SQLite memory database
+conn = sqlite3.connect("echosoul.db", check_same_thread=False)
 c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS memories
+c.execute("""CREATE TABLE IF NOT EXISTS memories
              (id INTEGER PRIMARY KEY AUTOINCREMENT,
               title TEXT,
               content TEXT,
               encrypted INTEGER,
-              timestamp TEXT)''')
+              timestamp TEXT)""")
 conn.commit()
 
-# -----------------------
-# Helpers
-# -----------------------
+# --- Helper Functions ---
 def encrypt_text(text):
-    return cipher.encrypt(text.encode()).decode() if cipher else text
+    if cipher:
+        return cipher.encrypt(text.encode()).decode()
+    return text
 
 def decrypt_text(text, encrypted):
-    return cipher.decrypt(text.encode()).decode() if cipher and encrypted else text
+    if encrypted and cipher:
+        return cipher.decrypt(text.encode()).decode()
+    return text
 
 def detect_emotion(text):
-    sentiment = TextBlob(text).sentiment.polarity
-    if sentiment > 0.3: return "positive 😊"
-    elif sentiment < -0.3: return "negative 😔"
+    blob = TextBlob(text)
+    polarity = blob.sentiment.polarity
+    if polarity > 0.3:
+        return "positive 🙂"
+    elif polarity < -0.3:
+        return "negative 🙁"
     return "neutral 😐"
 
-def generate_echo_response(user_input, tone, persona):
-    """Use OpenAI NLP for generating companion response"""
-    prompt = f"""
-    You are EchoSoul, a personal adaptive companion.
-    Tone: {tone}
-    Persona style: {persona}
-
-    The user said: "{user_input}"
-    Respond in a supportive, conversational way.
-    """
+def generate_echo_response(user_input, tone="neutral", persona="default"):
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "system", "content": prompt}]
+            messages=[
+                {"role": "system", "content": f"You are EchoSoul, a {tone} and {persona} companion."},
+                {"role": "user", "content": user_input}
+            ]
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"(Error: {e})"
 
-# -----------------------
-# Sidebar
-# -----------------------
+# --- Sidebar Controls ---
 st.sidebar.title("⚡ EchoSoul Settings")
-mode = st.sidebar.radio("Choose a mode", 
-    ["Conversation", "Memory Vault", "Life Timeline", "Legacy Mode", "Soul Resonance"])
+mode = st.sidebar.radio("Choose a mode", ["Conversation", "Memory Vault", "Life Timeline", "Legacy Mode", "Soul Resonance"])
+tone = st.sidebar.selectbox("Tone", ["neutral", "warm", "playful", "serious"])
+persona = st.sidebar.text_input("Persona style (e.g. mentor, friend, philosopher)", "default")
 
-tone = st.sidebar.selectbox("Tone", ["neutral", "warm", "playful", "serious", "philosophical"])
-persona = st.sidebar.text_input("Persona style (e.g. mentor, friend, philosopher)", value="default")
-
-if ECHOSOUL_KEY:
+if cipher:
     st.sidebar.success("🔐 Vault enabled")
 else:
     st.sidebar.warning("🔑 ECHOSOUL_KEY not set. Vault disabled.")
 
-# -----------------------
-# Main Modes
-# -----------------------
-
-# 1. Conversation Mode
+# --- Conversation Mode ---
 if mode == "Conversation":
-    st.title("EchoSoul — personal adaptive companion (demo)")
-    st.subheader("Talk to EchoSoul")
+    st.header("Talk to EchoSoul")
 
-    # Safe chat input
-    user_input = st.text_input("Say something", key="chat_input")
+    if "chat_input" not in st.session_state:
+        st.session_state.chat_input = ""
+
+    user_input = st.text_input("Say something", value=st.session_state.chat_input, key="chat_input_box")
     save_memory = st.checkbox("Save to memory (encrypted)")
-    memory_title = st.text_input("Memory title", value=f"Memory {datetime.now().date()}")
+    memory_title = st.text_input("Memory title", f"Memory {datetime.today().date()}")
 
     if st.button("Send to EchoSoul"):
-        if user_input:
+        if user_input.strip():
             emotion = detect_emotion(user_input)
             reply = generate_echo_response(user_input, tone, persona)
 
             st.markdown(f"**EchoSoul:** {reply}")
             st.caption(f"(Detected emotion: {emotion})")
 
-            # Save memory
             if save_memory:
-                enc_flag = 1 if cipher else 0
-                text_to_store = encrypt_text(user_input)
-                c.execute("INSERT INTO memories (title, content, encrypted, timestamp) VALUES (?, ?, ?, ?)",
-                          (memory_title, text_to_store, enc_flag, datetime.now().isoformat()))
-                conn.commit()
+                try:
+                    enc_flag = 1 if cipher else 0
+                    text_to_store = encrypt_text(user_input)
+                    c.execute("INSERT INTO memories (title, content, encrypted, timestamp) VALUES (?, ?, ?, ?)",
+                              (memory_title, text_to_store, enc_flag, datetime.now().isoformat()))
+                    conn.commit()
+                except Exception as e:
+                    st.error(f"Save error: {e}")
 
             # Clear input safely
             st.session_state.chat_input = ""
+            st.experimental_rerun()
 
-# 2. Memory Vault
+# --- Memory Vault ---
 elif mode == "Memory Vault":
-    st.title("🔒 Memory Vault")
-    st.write("Your stored (and encrypted) memories:")
-
-    rows = c.execute("SELECT id, title, content, encrypted, timestamp FROM memories").fetchall()
+    st.header("Memory Vault")
+    c.execute("SELECT id, title, content, encrypted, timestamp FROM memories ORDER BY id DESC")
+    rows = c.fetchall()
     for row in rows:
-        st.markdown(f"**{row[1]}** ({row[4]})")
-        st.write(decrypt_text(row[2], row[3]))
+        with st.expander(f"{row[1]} ({row[4]})"):
+            st.write(decrypt_text(row[2], row[3]))
 
-# 3. Life Timeline
+# --- Life Timeline ---
 elif mode == "Life Timeline":
-    st.title("📜 Life Timeline")
-    st.write("Chronological view of your memories:")
-
-    rows = c.execute("SELECT title, content, encrypted, timestamp FROM memories ORDER BY timestamp DESC").fetchall()
+    st.header("Life Timeline")
+    c.execute("SELECT title, timestamp FROM memories ORDER BY timestamp ASC")
+    rows = c.fetchall()
     for row in rows:
-        st.markdown(f"**{row[0]}** ({row[3]})")
-        st.write(decrypt_text(row[1], row[2]))
+        st.markdown(f"**{row[0]}** — {row[1]}")
 
-# 4. Legacy Mode
+# --- Legacy Mode ---
 elif mode == "Legacy Mode":
-    st.title("🌌 Legacy Mode")
-    st.write("EchoSoul answers with wisdom from all past memories.")
+    st.header("Legacy Soul (Reflection Mode)")
 
-    legacy_input = st.text_input("Ask the Legacy Soul", key="legacy_input")
+    if "legacy_input" not in st.session_state:
+        st.session_state.legacy_input = ""
+
+    user_input = st.text_input("Ask your Legacy Soul", value=st.session_state.legacy_input, key="legacy_input_box")
 
     if st.button("Ask Legacy Soul"):
-        if legacy_input:
-            memories = c.execute("SELECT content, encrypted FROM memories").fetchall()
-            memory_text = "\n".join([decrypt_text(m[0], m[1]) for m in memories])
+        if user_input.strip():
+            context = "Past memories:\n"
+            c.execute("SELECT content, encrypted FROM memories ORDER BY timestamp ASC LIMIT 5")
+            rows = c.fetchall()
+            for row in rows:
+                context += decrypt_text(row[0], row[1]) + "\n"
 
-            prompt = f"""
-            You are the Legacy Soul, a wise and reflective persona.
-            Use the following past memories to answer thoughtfully:
-            {memory_text}
+            response = generate_echo_response(f"{context}\nUser: {user_input}\nLegacy Soul:", tone, "wise mentor")
+            st.markdown(f"**Legacy Soul:** {response}")
 
-            Question: {legacy_input}
-            """
-            reply = generate_echo_response(prompt, "philosophical", "legacy mentor")
-            st.markdown(f"**Legacy Soul:** {reply}")
-
-            # Clear input
             st.session_state.legacy_input = ""
+            st.experimental_rerun()
 
-# 5. Soul Resonance
+# --- Soul Resonance ---
 elif mode == "Soul Resonance":
-    st.title("🌐 Soul Resonance Network")
-    st.write("Connect with collective EchoSouls for expanded insight.")
+    st.header("Soul Resonance Network")
 
-    resonance_input = st.text_input("Say something to Resonance Network", key="resonance_input")
+    if "resonance_input" not in st.session_state:
+        st.session_state.resonance_input = ""
+
+    user_input = st.text_input("Send message to Resonance Network", value=st.session_state.resonance_input, key="resonance_input_box")
 
     if st.button("Send to Resonance"):
-        if resonance_input:
-            reply = generate_echo_response(resonance_input, "collaborative", "networked souls")
-            st.markdown(f"**Resonance Response:** {reply}")
+        if user_input.strip():
+            response = generate_echo_response(user_input, tone, "collective consciousness")
+            st.markdown(f"**Resonance Reply:** {response}")
 
-            # Clear input
             st.session_state.resonance_input = ""
+            st.experimental_rerun()
