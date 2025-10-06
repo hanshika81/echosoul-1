@@ -1,6 +1,7 @@
-streamlit>=1.20
-cryptography>=40.0
-textblob>=0.17.1
-streamlit-webrtc>=0.57.0
-aiortc>=1.6.0
-pydub>=0.25.1
+streamlit
+openai>=1.0.0
+cryptography
+textblob
+spacy
+sqlite-utils
+streamlit-webrtc
