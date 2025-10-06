@@ -1,405 +1,226 @@
-# app.py
-"""
-EchoSoul - Streamlit single-file app
-Features:
-- Persistent encrypted memory (SQLite + Fernet)
-- Adaptive personality (tone + persona)
-- NLP: TextBlob sentiment + optional spaCy (NER & noun-chunks)
-- OpenAI LLM for adaptive responses (OPENAI_API_KEY)
-- Conversation, Memory Vault, Life Timeline, Time-Shifted Self, Legacy Mode, Soul Resonance
-- Live Call (simulated) via streamlit-webrtc (optional)
-- Chat history stored in session_state so replies persist; chatbox clears after send
-"""
-
 import os
 import json
-import sqlite3
-import traceback
-from datetime import datetime
-from typing import Optional, Dict, Any
-
 import streamlit as st
+import datetime
+from cryptography.fernet import Fernet
 from textblob import TextBlob
 import openai
+from openai.error import RateLimitError, OpenAIError
 
-# Optional spaCy (if available)
-try:
-    import spacy
+# ----------------------------
+# Setup
+# ----------------------------
+st.set_page_config(
+    page_title="EchoSoul",
+    page_icon="✨",
+    layout="wide"
+)
 
+# OpenAI API Key
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Encryption Key
+VAULT_KEY = os.getenv("ECHOSOUL_KEY")
+if VAULT_KEY:
     try:
-        nlp = spacy.load("en_core_web_sm")
+        fernet = Fernet(VAULT_KEY)
+        vault_enabled = True
     except Exception:
-        # model may be missing at runtime; set nlp to None gracefully
-        nlp = None
-except Exception:
-    nlp = None
+        fernet = None
+        vault_enabled = False
+else:
+    fernet = None
+    vault_enabled = False
 
-# Optional WebRTC (live call simulation)
-try:
-    from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+# ----------------------------
+# Utility Functions
+# ----------------------------
+def encrypt_memory(data: str) -> str:
+    if not vault_enabled:
+        return data
+    return fernet.encrypt(data.encode()).decode()
 
-    STREAMLIT_WEBRTC_AVAILABLE = True
-except Exception:
-    STREAMLIT_WEBRTC_AVAILABLE = False
+def decrypt_memory(token: str) -> str:
+    if not vault_enabled:
+        return token
+    return fernet.decrypt(token.encode()).decode()
 
-# ----------------------
-# Config & environment
-# ----------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ECHOSOUL_KEY = os.getenv("ECHOSOUL_KEY")  # Fernet key (base64)
-DB_PATH = os.getenv("ECHOSOUL_DB", "echosoul.db")
+def analyze_emotion(text: str) -> str:
+    tb = TextBlob(text)
+    polarity = tb.sentiment.polarity
+    if polarity > 0.5:
+        return "very positive"
+    elif polarity > 0:
+        return "positive"
+    elif polarity == 0:
+        return "neutral"
+    elif polarity < -0.5:
+        return "very negative"
+    else:
+        return "negative"
 
-openai.api_key = OPENAI_API_KEY
-
-# ----------------------
-# Encryption helper (Fernet)
-# ----------------------
-def get_cipher():
-    if not ECHOSOUL_KEY:
-        return None
+def call_openai(prompt: str, system_prompt: str = "You are EchoSoul, an adaptive AI companion.") -> str:
     try:
-        from cryptography.fernet import Fernet
-
-        return Fernet(ECHOSOUL_KEY.encode() if isinstance(ECHOSOUL_KEY, str) else ECHOSOUL_KEY)
-    except Exception:
-        return None
-
-
-cipher = get_cipher()
-
-# ----------------------
-# Database setup
-# ----------------------
-def init_db(path: str = DB_PATH):
-    conn = sqlite3.connect(path, check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT,
-            title TEXT,
-            content TEXT,
-            encrypted INTEGER DEFAULT 0,
-            metadata TEXT
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
         )
-        """
-    )
-    conn.commit()
-    return conn
-
-
-conn = init_db()
-cur = conn.cursor()
-
-
-def save_memory_db(title: str, content: str, encrypted: bool, metadata: Optional[dict] = None):
-    meta = json.dumps(metadata or {})
-    enc_flag = 1 if encrypted else 0
-    cur.execute(
-        "INSERT INTO memories (created_at, title, content, encrypted, metadata) VALUES (?, ?, ?, ?, ?)",
-        (datetime.utcnow().isoformat(), title, content, enc_flag, meta),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def list_memories_db(limit: int = 200):
-    cur.execute("SELECT id, created_at, title, encrypted, metadata FROM memories ORDER BY created_at DESC LIMIT ?", (limit,))
-    rows = cur.fetchall()
-    out = []
-    for r in rows:
-        out.append({"id": r[0], "created_at": r[1], "title": r[2], "encrypted": bool(r[3]), "metadata": json.loads(r[4] or "{}")})
-    return out
-
-
-def get_memory_db(mid: int):
-    cur.execute("SELECT id, created_at, title, content, encrypted, metadata FROM memories WHERE id = ?", (mid,))
-    r = cur.fetchone()
-    if not r:
-        return None
-    content = r[3]
-    if r[4]:
-        if cipher:
-            try:
-                content = cipher.decrypt(content.encode()).decode()
-            except Exception:
-                content = "<DECRYPTION_FAILED>"
-        else:
-            content = "<ENCRYPTED - KEY NOT CONFIGURED>"
-    return {"id": r[0], "created_at": r[1], "title": r[2], "content": content, "encrypted": bool(r[4]), "metadata": json.loads(r[5] or "{}")}
-
-
-# ----------------------
-# NLP helpers
-# ----------------------
-def analyze_text_nlp(text: str) -> Dict[str, Any]:
-    try:
-        blob = TextBlob(text)
-        polarity = blob.sentiment.polarity
-    except Exception:
-        polarity = 0.0
-
-    if polarity > 0.4:
-        mood = "happy"
-    elif polarity > 0.05:
-        mood = "calm"
-    elif polarity < -0.4:
-        mood = "angry/sad"
-    elif polarity < -0.05:
-        mood = "upset"
-    else:
-        mood = "neutral"
-
-    entities = []
-    key_phrases = []
-    if nlp:
-        try:
-            doc = nlp(text)
-            entities = [{"text": ent.text, "label": ent.label_} for ent in doc.ents]
-            key_phrases = [chunk.text for chunk in doc.noun_chunks]
-        except Exception:
-            entities = []
-            key_phrases = []
-
-    return {"polarity": polarity, "mood": mood, "entities": entities, "key_phrases": key_phrases}
-
-
-# ----------------------
-# OpenAI wrapper
-# ----------------------
-def call_openai_chat(messages: list, max_tokens: int = 300):
-    if not OPENAI_API_KEY:
-        return False, "OpenAI API key not configured (OPENAI_API_KEY)."
-
-    try:
-        resp = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=messages, max_tokens=max_tokens, temperature=0.8)
-        return True, resp.choices[0].message.content.strip()
-    except openai.error.RateLimitError as e:
-        return False, f"Rate limit / quota error: {e}"
-    except openai.error.OpenAIError as e:
-        return False, f"OpenAI API error: {e}"
+        return resp.choices[0].message["content"].strip()
+    except RateLimitError:
+        return "⚠️ OpenAI API rate limit reached. Please try again later."
+    except OpenAIError as e:
+        return f"⚠️ OpenAI API error: {str(e)}"
     except Exception as e:
-        return False, f"Unexpected error: {e}"
+        return f"⚠️ Unexpected error: {str(e)}"
 
-
-def generate_echo_response(user_text: str, profile: dict, context: Optional[str] = None, mode: str = "reflect"):
-    prefix = f"You are EchoSoul — an adaptive, compassionate assistant.\nTone: {profile.get('tone','warm')}\nPersona: {profile.get('persona','A supportive companion')}."
-    if profile.get("name"):
-        prefix += f" Address the user by name: {profile.get('name')}."
-    if mode == "legacy":
-        prefix += " Answer like a wise older version of the user."
-
-    if context:
-        prefix += f"\nContext (recent memories):\n{context}"
-
-    system_msg = {"role": "system", "content": prefix}
-    user_msg = {"role": "user", "content": user_text}
-    ok, resp = call_openai_chat([system_msg, user_msg], max_tokens=400)
-    if ok:
-        return True, resp
-    else:
-        # Fallback
-        analysis = analyze_text_nlp(user_text)
-        fallback = f"[{profile.get('tone','warm')} voice | mood: {analysis['mood']}] I hear you: \"{user_text}\"."
-        return False, f"{resp}\n\nFallback: {fallback}"
-
-
-# ----------------------
-# Streamlit UI
-# ----------------------
-st.set_page_config(page_title="EchoSoul", layout="wide")
-st.title("EchoSoul — adaptive, memoryful AI companion")
-
-# Session state init
-if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = []  # list of messages: {"role":"user|echo|system", "text":..., "time":...}
-
+# ----------------------------
+# State Initialization
+# ----------------------------
+if "memories" not in st.session_state:
+    st.session_state.memories = []
+if "timeline" not in st.session_state:
+    st.session_state.timeline = []
+if "conversation" not in st.session_state:
+    st.session_state.conversation = []
 if "profile" not in st.session_state:
-    st.session_state["profile"] = {"name": "", "tone": "warm", "persona": "A supportive companion."}
+    st.session_state.profile = {
+        "name": "",
+        "tone": "neutral",
+        "persona": "A supportive companion."
+    }
 
-# Sidebar controls
-with st.sidebar:
-    st.header("EchoSoul Controls")
-    st.session_state.profile["name"] = st.text_input("Your name", value=st.session_state.profile.get("name", ""))
-    st.session_state.profile["tone"] = st.selectbox(
-        "Personality tone", ["warm", "scientific", "playful", "stoic", "empathetic"], index=["warm", "scientific", "playful", "stoic", "empathetic"].index(st.session_state.profile.get("tone", "warm"))
-    )
-    st.session_state.profile["persona"] = st.text_area("Persona description (how EchoSoul sounds)", value=st.session_state.profile.get("persona", "A supportive companion."))
-    if st.button("Save profile"):
-        st.success("Profile saved")
+# ----------------------------
+# Sidebar
+# ----------------------------
+st.sidebar.title("EchoSoul Controls")
+st.sidebar.text_input("Your name", key="profile_name", value=st.session_state.profile["name"])
+st.sidebar.selectbox("Personality tone", ["neutral", "playful", "serious", "empathetic"], key="profile_tone", index=["neutral", "playful", "serious", "empathetic"].index(st.session_state.profile["tone"]))
+st.sidebar.text_area("Persona description (how EchoSoul sounds)", key="profile_persona", value=st.session_state.profile["persona"])
+if st.sidebar.button("Save profile"):
+    st.session_state.profile["name"] = st.session_state.profile_name
+    st.session_state.profile["tone"] = st.session_state.profile_tone
+    st.session_state.profile["persona"] = st.session_state.profile_persona
+    st.sidebar.success("Profile updated!")
 
-    st.markdown("---")
-    st.markdown("**Encryption / Vault**")
-    if cipher:
-        st.success("Vault enabled — encrypted memories will be saved.")
-    else:
-        st.warning("ECHOSOUL_KEY not set or invalid. Encrypted vault disabled.")
-        st.caption("Set environment var ECHOSOUL_KEY to enable encryption (Fernet key).")
+st.sidebar.markdown("### Encryption / Vault")
+if vault_enabled:
+    st.sidebar.success("Vault enabled — encrypted memories will be saved.")
+else:
+    st.sidebar.warning("Vault disabled — memories will not be encrypted.")
 
-    st.markdown("---")
-    st.caption("Set OPENAI_API_KEY in environment to enable LLM responses.")
+# ----------------------------
+# Main Tabs
+# ----------------------------
+tabs = st.tabs([
+    "Conversation",
+    "Memory Vault",
+    "Life Timeline",
+    "Time-Shifted Self",
+    "Legacy Mode"
+])
 
-# Tabs
-tabs = st.tabs(["Conversation", "Memory Vault", "Life Timeline", "Time-Shifted Self", "Legacy Mode", "Soul Resonance", "Live Call (Sim)"])
-
-# ---------- Conversation ----------
+# ----------------------------
+# Conversation Tab
+# ----------------------------
 with tabs[0]:
     st.header("Talk to EchoSoul")
-    if "chat_input" not in st.session_state:
-        st.session_state["chat_input"] = ""
+    user_input = st.text_area("Say something", key="chat_input")
+    save_memory = st.checkbox("Save to memory (encrypted)")
+    memory_title = st.text_input("Memory title", value=f"Memory {datetime.date.today()}")
 
-    user_text = st.text_area("Say something", value=st.session_state["chat_input"], key="chat_input_box", height=120)
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        save_enc = st.checkbox("Save to memory (encrypted)", value=False, key="save_enc")
-    with col2:
-        mem_title = st.text_input("Memory title", value=f"Memory {datetime.utcnow().date()}", key="mem_title")
-    with col3:
-        st.write("")  # spacer
-        send = st.button("Send to EchoSoul", type="primary")
+    if st.button("Send to EchoSoul"):
+        if user_input.strip():
+            emotion = analyze_emotion(user_input)
+            system_prompt = f"You are EchoSoul, an adaptive AI companion. Tone: {st.session_state.profile['tone']}. Persona: {st.session_state.profile['persona']}."
+            reply = call_openai(f"User: {user_input}\nEmotion detected: {emotion}\nRespond helpfully.")
+            st.session_state.conversation.append(("user", user_input))
+            st.session_state.conversation.append(("ai", reply))
 
-    if send:
-        if user_text.strip():
-            st.session_state["chat_input"] = user_text
-            analysis = analyze_text_nlp(user_text)
+            if save_memory:
+                encrypted = encrypt_memory(user_input + " | " + reply)
+                st.session_state.memories.append({
+                    "title": memory_title,
+                    "content": encrypted,
+                    "date": str(datetime.date.today())
+                })
 
-            # build context from recent memories
-            recent = list_memories_db(limit=6)
-            ctx = ""
-            for m in recent:
-                mem = get_memory_db(m["id"])
-                if mem:
-                    ctx += f"{mem['title']}: {mem['content']}\n"
-
-            ok, reply = generate_echo_response(user_text, st.session_state["profile"], context=ctx, mode="reflect")
-
-            st.session_state["chat_history"].append({"role": "user", "text": user_text, "time": datetime.utcnow().isoformat()})
-            st.session_state["chat_history"].append({"role": "echo", "text": reply, "time": datetime.utcnow().isoformat(), "ok": ok})
-
-            if save_enc:
-                try:
-                    to_store = cipher.encrypt(user_text.encode()).decode() if cipher else user_text
-                    meta = {"analysis": analysis, "source": "conversation"}
-                    save_memory_db(mem_title, to_store, encrypted=bool(cipher), metadata=meta)
-                    st.session_state["chat_history"].append({"role": "system", "text": f"Memory '{mem_title}' saved.", "time": datetime.utcnow().isoformat()})
-                except Exception as e:
-                    st.session_state["chat_history"].append({"role": "system", "text": f"Save error: {e}", "time": datetime.utcnow().isoformat()})
-
-            # Clear input and rerun so widget resets visually
-            st.session_state["chat_input"] = ""
-            st.rerun()
-
-    st.markdown("---")
-    st.markdown("#### Conversation history")
-    for msg in st.session_state["chat_history"]:
-        if msg["role"] == "user":
-            st.markdown(f"**You:** {msg['text']}")
-        elif msg["role"] == "echo":
-            if msg.get("ok"):
-                st.markdown(f"**EchoSoul:** {msg['text']}")
-            else:
-                st.markdown(f"**EchoSoul (error/fallback):** {msg['text']}")
+    st.subheader("Conversation History")
+    for speaker, text in st.session_state.conversation:
+        if speaker == "user":
+            st.markdown(f"**You:** {text}")
         else:
-            st.info(msg["text"])
+            st.markdown(f"**EchoSoul:** {text}")
 
-# ---------- Memory Vault ----------
+# ----------------------------
+# Memory Vault Tab
+# ----------------------------
 with tabs[1]:
-    st.header("Memory Vault")
-    st.write("Securely stored memories. Decrypted only if ECHOSOUL_KEY is configured.")
-    mems = list_memories_db(limit=200)
-    if not mems:
-        st.info("No memories yet.")
+    st.header("Your Memory Vault")
+    if not st.session_state.memories:
+        st.info("No memories saved yet.")
     else:
-        for m in mems:
-            with st.expander(f"{m['title']} — {m['created_at'][:19]}"):
-                mem = get_memory_db(m["id"])
-                if mem:
-                    st.write(mem["content"])
-                    st.json(mem["metadata"])
+        for mem in st.session_state.memories:
+            with st.expander(mem["title"] + " (" + mem["date"] + ")"):
+                if vault_enabled:
+                    st.write(decrypt_memory(mem["content"]))
                 else:
-                    st.write("Error reading memory.")
+                    st.write(mem["content"])
 
-    st.markdown("---")
-    if st.button("Clear all memories (dangerous)", key="clear_all"):
-        cur.execute("DELETE FROM memories")
-        conn.commit()
-        st.success("All memories cleared.")
-        st.rerun()
-
-# ---------- Life Timeline ----------
+# ----------------------------
+# Life Timeline Tab
+# ----------------------------
 with tabs[2]:
-    st.header("Life Timeline")
-    cur.execute("SELECT id, created_at, title, encrypted FROM memories ORDER BY created_at ASC")
-    rows = cur.fetchall()
-    if not rows:
-        st.info("No timeline entries yet.")
+    st.header("Your Life Timeline")
+    timeline_entry = st.text_input("Add a life event")
+    if st.button("Save event"):
+        if timeline_entry.strip():
+            st.session_state.timeline.append({
+                "event": timeline_entry,
+                "date": str(datetime.date.today())
+            })
+    if not st.session_state.timeline:
+        st.info("No timeline events yet.")
     else:
-        for mid, created_at, title, enc in rows:
-            mem = get_memory_db(mid)
-            content = mem["content"] if mem else ""
-            st.markdown(f"**{created_at[:10]} — {title}**")
-            st.write(content)
+        for event in st.session_state.timeline:
+            st.markdown(f"📌 **{event['date']}** — {event['event']}")
 
-# ---------- Time-Shifted Self ----------
+# ----------------------------
+# Time-Shifted Self Tab
+# ----------------------------
 with tabs[3]:
-    st.header("Time-Shifted Self")
-    ts_mode = st.radio("Mode", ["past", "future", "reflection"])
-    ts_years = st.slider("Years shift", min_value=1, max_value=50, value=5)
-    ts_prompt = st.text_area("What would you ask your time-shifted self?", height=120)
-    if st.button("Talk to time-shifted self", key="timeshift"):
-        profile = dict(st.session_state["profile"])
-        profile["persona"] = f"{profile.get('persona','')} (as your {ts_mode} self, {ts_years} years {'ago' if ts_mode=='past' else 'ahead'})"
-        recent = list_memories_db(limit=10)
-        ctx = "\n".join([get_memory_db(m["id"])["content"] for m in recent if get_memory_db(m["id"])])
-        ok, reply = generate_echo_response(ts_prompt or "Hello", profile, context=ctx, mode="time-shift")
-        st.markdown(f"**Time-Shifted Echo ({ts_mode}, {ts_years}y):** {reply}")
-        st.session_state["chat_history"].append({"role": "echo", "text": f"(Time-shifted) {reply}", "time": datetime.utcnow().isoformat(), "ok": ok})
+    st.header("Talk to Your Past or Future Self")
+    target = st.radio("Choose", ["Past Self", "Future Self"])
+    question = st.text_area("What do you want to ask?")
+    if st.button("Ask Time-Shifted Self"):
+        if question.strip():
+            direction = "Imagine you are the user's past self." if target == "Past Self" else "Imagine you are the user's future self."
+            answer = call_openai(f"{direction} The user asks: {question}")
+            st.markdown(f"**{target} says:** {answer}")
 
-# ---------- Legacy Mode ----------
+# ----------------------------
+# Legacy Mode Tab
+# ----------------------------
 with tabs[4]:
     st.header("Legacy Mode")
-    if "legacy_q" not in st.session_state:
-        st.session_state["legacy_q"] = ""
-    legacy_q = st.text_input("Ask your legacy self", value=st.session_state["legacy_q"], key="legacy_box")
-    if st.button("Consult Legacy Soul"):
-        if legacy_q.strip():
-            all_mem = list_memories_db(limit=50)
-            ctx = "\n".join([get_memory_db(m["id"])["content"] for m in all_mem if get_memory_db(m["id"])])
-            ok, reply = generate_echo_response(legacy_q, st.session_state["profile"], context=ctx, mode="legacy")
-            st.markdown(f"**Legacy Echo:** {reply}")
-            st.session_state["chat_history"].append({"role": "echo", "text": f"(Legacy) {reply}", "time": datetime.utcnow().isoformat(), "ok": ok})
-            st.session_state["legacy_q"] = ""
-            st.rerun()
-
-# ---------- Soul Resonance ----------
-with tabs[5]:
-    st.header("Soul Resonance Network")
-    if "res_input" not in st.session_state:
-        st.session_state["res_input"] = ""
-    res_in = st.text_input("Send to Soul Resonance", value=st.session_state["res_input"], key="res_box")
-    if st.button("Send to Resonance"):
-        if res_in.strip():
-            ok, reply = generate_echo_response(res_in, st.session_state["profile"], context="Resonance network collectives", mode="resonance")
-            st.markdown(f"**Resonance Reply:** {reply}")
-            st.session_state["chat_history"].append({"role": "echo", "text": f"(Resonance) {reply}", "time": datetime.utcnow().isoformat(), "ok": ok})
-            st.session_state["res_input"] = ""
-            st.rerun()
-
-# ---------- Live Call (Sim) ----------
-with tabs[6]:
-    st.header("Live Call (Simulated)")
-    st.write("This demo captures audio (if environment supports streamlit-webrtc + ffmpeg). Replace with Twilio/Agora for production PSTN/VoIP.")
-    if not STREAMLIT_WEBRTC_AVAILABLE:
-        st.warning("streamlit-webrtc not available. Live call disabled.")
-    else:
-        class SimpleAudioProcessor(AudioProcessorBase):
-            def recv(self, frame):
-                # placeholder for audio processing / emotion detection
-                return frame
-
-        webrtc_streamer(key="echosoul_live", audio_processor_factory=SimpleAudioProcessor)
-        st.caption("Captured audio frames are sent to the placeholder processor.")
-
-st.markdown("---")
-st.caption("EchoSoul — scaffold for the features listed. Replace or extend LLM/provider and voice/emotion models for production.")
+    st.markdown("Preserve your wisdom for future generations.")
+    legacy_prompt = st.text_area("What message would you like to leave behind?")
+    if st.button("Save Legacy Message"):
+        if legacy_prompt.strip():
+            st.session_state.memories.append({
+                "title": f"Legacy - {datetime.date.today()}",
+                "content": encrypt_memory(legacy_prompt),
+                "date": str(datetime.date.today())
+            })
+            st.success("Legacy message saved to vault!")
+    if st.session_state.memories:
+        st.subheader("Legacy Messages")
+        for mem in st.session_state.memories:
+            if mem["title"].startswith("Legacy"):
+                with st.expander(mem["title"]):
+                    if vault_enabled:
+                        st.write(decrypt_memory(mem["content"]))
+                    else:
+                        st.write(mem["content"])
