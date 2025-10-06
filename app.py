@@ -115,8 +115,7 @@ if section == "Chat":
             st.markdown(f"**EchoSoul:** {reply}")
 
             # Clear input properly
-            st.session_state.chat_input = ""
-
+            st.session_state.update({"chat_input": ""})
 elif section == "Search Timeline":
     st.subheader("Search your timeline")
     search_query = st.text_input("Search query", key="timeline_search")
