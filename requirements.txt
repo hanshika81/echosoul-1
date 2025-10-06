@@ -1,9 +1,6 @@
-streamlit
-openai
-cryptography
-streamlit-webrtc
-av
-speechrecognition
-pyttsx3
-numpy
-python-dotenv
+streamlit>=1.20
+cryptography>=40.0
+textblob>=0.17.1
+streamlit-webrtc>=0.57.0
+aiortc>=1.6.0
+pydub>=0.25.1
