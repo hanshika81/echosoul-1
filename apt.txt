@@ -1,8 +1,2 @@
 ffmpeg
-libsm6
-libxext6
-libgl1
-libsndfile1
-libportaudio2
-libopus0
-libvpx7
+# add other system-level deps here if needed (for example libsndfile or build tools)
