@@ -1,160 +1,543 @@
+# app.py - EchoSoul (large single-file Streamlit app)
+# Features: persistent memory, adaptive personality, emotion detection,
+# timeline, custom style learning, private encrypted vault, legacy mode,
+# time-shifted self (simulated), soul resonance network (peer demo), life
+# path simulator (heuristic), realtime voice (streamlit-webrtc), export.
+#
+# NOTE: read the top-of-file comments about dependencies and secrets.
+
+import streamlit as st
 import os
 import json
-import hashlib
-import base64
+import datetime
+import re
 from cryptography.fernet import Fernet
-import streamlit as st
-from openai import OpenAI
-from datetime import datetime
+from pathlib import Path
+from typing import List, Dict, Any
+from dataclasses import dataclass, asdict
+import threading
+import time
 
-# --------------------
-# OpenAI Setup
-# --------------------
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# OpenAI: try new client if available, fallback if needed
+try:
+    # modern client
+    from openai import OpenAI
+    OPENAI_NEW = True
+except Exception:
+    OPENAI_NEW = False
+    import openai
 
-# --------------------
-# Utility functions
-# --------------------
-def generate_key(password: str) -> bytes:
-    return base64.urlsafe_b64encode(hashlib.sha256(password.encode()).digest())
+# WebRTC and audio
+try:
+    from streamlit_webrtc import webrtc_streamer, AudioProcessorBase, WebRtcMode
+    import av
+    WEBSUPPORT = True
+except Exception:
+    WEBSUPPORT = False
 
-def encrypt_text(password: str, text: str) -> str:
+# Speech recognition and TTS (optional, platform-dependent)
+try:
+    import speech_recognition as sr
+    import pyttsx3
+    AUDIO_SUPPORT = True
+except Exception:
+    AUDIO_SUPPORT = False
+
+# -------------------------
+# Config & Secrets
+# -------------------------
+st.set_page_config(layout="wide", page_title="EchoSoul")
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+TIMELINE_FILE = DATA_DIR / "timeline.json"
+MEMORY_FILE = DATA_DIR / "memories.json"
+VAULT_FILE = DATA_DIR / "vault.json"
+PERSONA_FILE = DATA_DIR / "persona.json"
+
+OPENAI_API_KEY = None
+if "OPENAI_API_KEY" in st.secrets:
+    OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+elif os.getenv("OPENAI_API_KEY"):
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if OPENAI_API_KEY is None:
+    st.warning("OpenAI API key not found. Put it in Streamlit secrets or env var OPENAI_API_KEY.")
+# initialize client
+if OPENAI_API_KEY:
+    if OPENAI_NEW:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    else:
+        openai.api_key = OPENAI_API_KEY
+        client = openai
+
+# -------------------------
+# Utilities: file persistence
+# -------------------------
+def load_json(path: Path, default):
     try:
-        fernet = Fernet(generate_key(password))
-        return fernet.encrypt(text.encode()).decode()
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return None
+        return default
+    return default
 
-def decrypt_text(password: str, token: str) -> str:
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+# -------------------------
+# Data structures
+# -------------------------
+@dataclass
+class Memory:
+    timestamp: str
+    title: str
+    content: str
+    tags: List[str]
+
+# -------------------------
+# Session state initialisation (critical to avoid widget modification errors)
+# Must set defaults BEFORE creating widgets that use the keys.
+# -------------------------
+defaults = {
+    "chat_history": [],          # {"role":"user"/"assistant","text":...}
+    "timeline": load_json(TIMELINE_FILE, []),
+    "memories": load_json(MEMORY_FILE, []),
+    "vault_key": None,
+    "vault": load_json(VAULT_FILE, {}),
+    "persona": load_json(PERSONA_FILE, {"style":"friendly", "nick":"EchoSoul"}),
+    "personality_profile": {},
+    "adaptive_style_examples": [],
+    "knowledge": [],
+    # ui keys
+    "chat_input": "",
+    "selected_section": "Chat",
+    "live_call_active": False
+}
+
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# Setup encryption key if not present
+if st.session_state.vault_key is None:
+    # allow using pre-set fernet key in secrets for persistence across restarts
+    if "FERNET_KEY" in st.secrets and st.secrets["FERNET_KEY"]:
+        st.session_state.vault_key = st.secrets["FERNET_KEY"].encode()
+    else:
+        st.session_state.vault_key = Fernet.generate_key()
+fernet = Fernet(st.session_state.vault_key)
+
+# -------------------------
+# Basic NLP helpers (emotion / style / summarize)
+# -------------------------
+def detect_emotion_text(text: str) -> str:
+    t = text.lower()
+    # simple heuristics
+    if any(w in t for w in ["sad", "depressed", "unhappy", "miserable", "cry"]):
+        return "sad"
+    if any(w in t for w in ["happy", "glad", "joy", "excited", "yay"]):
+        return "happy"
+    if any(w in t for w in ["angry", "mad", "furious", "irritat"]):
+        return "angry"
+    if any(w in t for w in ["anxious", "worried", "nervous"]):
+        return "anxious"
+    return "neutral"
+
+def extract_personal_fact(text: str) -> Dict[str,str]:
+    # tiny heuristic: "I am X", "I like X", "I live in X", "I work as X"
+    m = re.search(r"\bI (?:am|\'m|like|live|work as|worked as|was)\b (.+)", text, flags=re.I)
+    if m:
+        fact = m.group(1).strip()
+        return {"fact": fact}
+    return {}
+
+def short_summary(text: str, max_len=200) -> str:
+    return text.strip()[:max_len]
+
+# -------------------------
+# OpenAI wrapper (resilient)
+# -------------------------
+def openai_chat_completion(messages: List[Dict[str,str]], model="gpt-4o-mini", temperature=0.7, max_tokens=512):
+    """
+    Use the available OpenAI client. Supports both new client (OpenAI) and legacy 'openai' import.
+    Returns assistant text or raises exception.
+    """
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OpenAI key not configured.")
     try:
-        fernet = Fernet(generate_key(password))
+        if OPENAI_NEW:
+            # new OpenAI client style
+            resp = client.chat.create(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+            # structure: resp.choices[0].message.content
+            return resp.choices[0].message["content"] if hasattr(resp.choices[0].message, "__getitem__") else resp.choices[0].message.content
+        else:
+            # fallback older style
+            resp = client.ChatCompletion.create(model="gpt-4", messages=messages, temperature=temperature, max_tokens=max_tokens)
+            return resp.choices[0].message["content"]
+    except Exception as e:
+        # bubble up clean error for UI
+        raise
+
+# -------------------------
+# Core features
+# -------------------------
+def add_to_timeline(item: Dict[str,Any]):
+    st.session_state.timeline.insert(0, item)  # newest first
+    save_json(TIMELINE_FILE, st.session_state.timeline)
+
+def store_memory(title: str, content: str, tags=None):
+    if tags is None:
+        tags = []
+    mem = Memory(timestamp=str(datetime.datetime.utcnow()), title=title, content=content, tags=tags)
+    st.session_state.memories.insert(0, asdict(mem))
+    save_json(MEMORY_FILE, st.session_state.memories)
+
+def encrypt_and_save_vault(key: str, plaintext: str):
+    token = fernet.encrypt(plaintext.encode()).decode()
+    st.session_state.vault[key] = token
+    save_json(VAULT_FILE, st.session_state.vault)
+
+def read_vault(key: str):
+    token = st.session_state.vault.get(key)
+    if not token:
+        return None
+    try:
         return fernet.decrypt(token.encode()).decode()
     except Exception:
         return None
 
-def load_data():
-    if os.path.exists("data.json"):
-        with open("data.json", "r") as f:
-            return json.load(f)
-    return {"timeline": [], "vault": []}
+# Personality & adaptive style learning
+def learn_style_example(user_text: str):
+    st.session_state.adaptive_style_examples.append({"text": user_text, "time": str(datetime.datetime.utcnow())})
+    # optionally store persona file
+    save_json(PERSONA_FILE, st.session_state.persona)
 
-def save_data(data):
-    with open("data.json", "w") as f:
-        json.dump(data, f, indent=2)
+def update_personality_with_interaction(user_text: str, assistant_text: str):
+    # simple heuristic: store into "knowledge" and adjust style counters
+    st.session_state.knowledge.append(user_text)
+    # simple tone modification: if user uses short sentences -> become succinct
+    avg_len = sum(len(x.split()) for x in st.session_state.adaptive_style_examples)/max(1,len(st.session_state.adaptive_style_examples))
+    if avg_len < 6:
+        st.session_state.persona["style"] = "succinct"
+    else:
+        st.session_state.persona["style"] = "conversational"
+    save_json(PERSONA_FILE, st.session_state.persona)
 
-# --------------------
-# AI Reply Generator
-# --------------------
-def generate_reply(data, user_input, use_memories=True):
-    context = ""
-    if use_memories and "timeline" in data and len(data["timeline"]) > 0:
-        last_items = data["timeline"][-5:]
-        context = "\n".join([f"{it['title']}: {it['content']}" for it in last_items])
+# -------------------------
+# High-level assistant: build system prompt from persona & timeline
+# -------------------------
+def craft_system_prompt():
+    p = st.session_state.persona
+    timeline_summary = f"You have stored {len(st.session_state.timeline)} timeline events."
+    persona_lines = f"Persona name: {p.get('nick','EchoSoul')}. Style: {p.get('style','friendly')}."
+    return f"You are EchoSoul, an adaptive personal companion.\n{persona_lines}\n{timeline_summary}\nAlways be empathetic, preserve privacy, and encourage reflection."
 
-    messages = [
-        {"role": "system", "content": "You are EchoSoul, an AI memory companion."},
-        {"role": "system", "content": f"Memory context:\n{context}"},
-        {"role": "user", "content": user_input}
-    ]
-
+def ask_echo(input_text: str, role: str="user") -> str:
+    # build messages with memory context (limited)
+    system = craft_system_prompt()
+    messages = [{"role":"system","content":system}]
+    # include last few timeline events
+    for ev in st.session_state.timeline[:6]:
+        messages.append({"role":"system","content":f"Timeline: {ev.get('timestamp')} - {ev.get('note') or ev.get('user','')} - {ev.get('echo','')}"})
+    # include persona hints
+    messages.append({"role":"system","content":f"Personality: {st.session_state.persona}"})
+    messages.append({"role":"user","content":input_text})
+    # call OpenAI
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",  # use gpt-4 or gpt-3.5-turbo if preferred
-            messages=messages,
-            max_tokens=200,
-            temperature=0.7
-        )
-        return response.choices[0].message.content.strip()
+        resp_text = openai_chat_completion(messages)
     except Exception as e:
-        return f"(Error: {e})"
+        # produce a safe fallback
+        return f"(Error calling OpenAI) {str(e)}"
+    # post-process
+    update_personality_with_interaction(input_text, resp_text)
+    return resp_text
 
-def search_timeline(data, query: str):
+# -------------------------
+# Advanced modules (simulated but functional)
+# -------------------------
+# 1) Time-Shifted Self: we allow the user to "speak to past self" or "future self" using prompt engineering
+def time_shifted_self(user_message: str, shift: str="past") -> str:
+    # shift: "past" | "future"
+    if shift == "past":
+        prompt = f"Roleplay the user's past self (5 years ago). You were more naive and hopeful. Respond concisely and reflectively to: {user_message}"
+    else:
+        prompt = f"Roleplay the user's future self (10 years in the future). Speak as a wiser, kinder version, giving advice on: {user_message}"
+    return ask_echo(prompt)
+
+# 2) Soul Resonance Network: demonstration peer-to-peer "knowledge sharing"
+# For safety, this is simulated locally by merging knowledge from a "network" file; functionally it merges nodes.
+NETWORK_FILE = DATA_DIR / "resonance_network.json"
+def network_broadcast_share(note: str):
+    net = load_json(NETWORK_FILE, [])
+    node = {"timestamp": str(datetime.datetime.utcnow()), "note": note}
+    net.insert(0, node)
+    save_json(NETWORK_FILE, net)
+    # merge into local knowledge (demo)
+    st.session_state.knowledge.append(note)
+    return f"Broadcasted to local network (demo)."
+
+def network_query_similar(query: str, limit=3):
+    net = load_json(NETWORK_FILE, [])
+    res = []
+    for item in net:
+        if query.lower() in (item.get("note","").lower()):
+            res.append(item)
+        if len(res) >= limit:
+            break
+    return res
+
+# 3) Life Path Simulation: simple scenario engine with heuristic scoring
+def simulate_life_path(current_state: Dict[str,Any], choices: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
+    # Each choice: {"title":..., "effect": function or dict}
     results = []
-    for item in data.get("timeline", []):
-        if query.lower() in item["title"].lower() or query.lower() in item["content"].lower():
-            results.append(item)
+    for c in choices:
+        # naive scoring: +1 if aligned with 'values' in persona
+        score = 0
+        if "values" in st.session_state.personality_profile:
+            for v in st.session_state.personality_profile["values"]:
+                if v.lower() in c.get("title","").lower():
+                    score += 2
+        # random deterministic additive from length
+        score += len(c.get("title","")) % 5
+        res = {"choice": c, "score": score, "outcome": f"Simulated outcome for {c.get('title')}"}
+        results.append(res)
+    results.sort(key=lambda x: x["score"], reverse=True)
     return results
 
-# --------------------
-# Streamlit UI
-# --------------------
-st.set_page_config(page_title="EchoSoul", layout="wide")
-st.title("✨ EchoSoul")
-st.sidebar.header("Settings")
+# 4) Echo Guardian & Consciousness Mirror: lightweight analytics on user's inputs
+def mirror_reflection(user_text: str) -> str:
+    # echo back habits (word frequency)
+    words = re.findall(r"\w+", user_text.lower())
+    freq = {}
+    for w in words:
+        freq[w] = freq.get(w,0) + 1
+    top = sorted(freq.items(), key=lambda x:x[1], reverse=True)[:5]
+    top_text = ", ".join([f"{w}:{c}" for w,c in top])
+    return f"I noticed you repeat these words often: {top_text}. This may reflect your focus or concern."
 
-vault_password = st.sidebar.text_input("Vault password", type="password")
-section = st.sidebar.radio("Choose section", ["Chat", "Search Timeline", "Private Vault", "Export/Info"])
+# -------------------------
+# Live call: audio processor (very simple)
+# -------------------------
+if WEBSUPPORT and AUDIO_SUPPORT:
+    class EchoAudioProcessor(AudioProcessorBase):
+        def __init__(self):
+            self.recognizer = sr.Recognizer()
+            self.tts_engine = pyttsx3.init()
+            # configure voice rate if you want
+            self.tts_engine.setProperty('rate', 150)
 
-data = load_data()
+        def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+            # We won't implement low-level audio frame -> speech recognition reliably in this file.
+            # streamlit-webrtc demos often use a JS media pipeline or the recorded chunks approach.
+            return frame
 
-# --------------------
-# Sections
-# --------------------
+    # Note: for a fully functioning live call you'd convert audio frames -> wav -> SpeechRecognition
+    # and then call ask_echo(...) and return TTS audio. That requires additional streaming control.
+
+# -------------------------
+# UI: main layout
+# -------------------------
+st.sidebar.title("Settings")
+vault_pw = st.sidebar.text_input("Vault password (for UI unlock)", type="password")
+section = st.sidebar.radio("Choose section", ["Chat", "Search Timeline", "Private Vault", "Network", "Simulations", "Live Call", "Export/Info", "About"], index=["Chat","Search Timeline","Private Vault","Network","Simulations","Live Call","Export/Info","About"].index(st.session_state.selected_section) if st.session_state.selected_section in ["Chat","Search Timeline","Private Vault","Network","Simulations","Live Call","Export/Info","About"] else 0)
+st.session_state.selected_section = section
+
+st.title("✨ EchoSoul — Your evolving companion")
+
+# -------------------------
+# Chat UI
+# -------------------------
 if section == "Chat":
-    st.subheader("Chat with EchoSoul")
-
+    st.header("Chat with EchoSoul")
+    # ensure the session_state key exists BEFORE creating widget (critical)
     if "chat_input" not in st.session_state:
         st.session_state.chat_input = ""
+    user_text = st.text_input("Say something to EchoSoul", key="chat_input")
+    col1, col2 = st.columns([1,4])
+    with col1:
+        if st.button("Send"):
+            if not user_text.strip():
+                st.warning("Type something first.")
+            else:
+                # detect emotion, store memory if a personal fact
+                emotion = detect_emotion_text(user_text)
+                fact = extract_personal_fact(user_text)
+                if fact:
+                    store_memory("Personal fact", fact["fact"], tags=["auto"])
+                # get reply
+                try:
+                    reply = ask_echo(user_text)
+                except Exception as e:
+                    reply = f"(Error generating reply) {e}"
+                # update chat history
+                st.session_state.chat_history.append({"role":"user","text":user_text})
+                st.session_state.chat_history.append({"role":"assistant","text":reply})
+                add_to_timeline({"timestamp": str(datetime.datetime.utcnow()), "note": user_text, "echo": reply, "mood": emotion})
+                # store style sample
+                learn_style_example(user_text)
+                # clear input by setting session_state BEFORE widget redraw (safe)
+                st.session_state.chat_input = ""
+                st.success("Reply generated.")
+    with col2:
+        # display last few messages
+        for msg in st.session_state.chat_history[-8:]:
+            if msg["role"] == "user":
+                st.markdown(f"**You:** {msg['text']}")
+            else:
+                st.markdown(f"**EchoSoul:** {msg['text']}")
 
-    user_input = st.text_input("Say something to EchoSoul", key="chat_input")
-
-    if st.button("Send"):
-        if not user_input.strip():
-            st.warning("Type something first.")
-        else:
-            reply = generate_reply(data, user_input.strip(), use_memories=True)
-
-            data["timeline"].append({
-                "title": f"Chat {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                "content": f"You: {user_input}\nEchoSoul: {reply}"
-            })
-            save_data(data)
-
-            st.success("Reply generated.")
-            st.markdown(f"**You:** {user_input}")
-            st.markdown(f"**EchoSoul:** {reply}")
-
-            # Clear input properly
-            # At the very top of your app.py, after imports
-if "chat_input" not in st.session_state:
-    st.session_state.chat_input = ""
+# -------------------------
+# Timeline search / browse
+# -------------------------
 elif section == "Search Timeline":
-    st.subheader("Search your timeline")
-    search_query = st.text_input("Search query", key="timeline_search")
-    if search_query.strip():
-        results = search_timeline(data, search_query.strip())
-        st.markdown(f"Found **{len(results)}** results")
-        for r in results[:20]:
-            st.markdown(f"**{r['title']}**")
-            st.write(r["content"])
-            st.markdown("---")
-
-elif section == "Private Vault":
-    st.subheader("Private Vault")
-    if vault_password:
-        vt = st.text_input("Title for vault item", key="vt")
-        vc = st.text_area("Secret content", key="vc")
-        if st.button("Save to vault"):
-            encrypted = encrypt_text(vault_password, vc)
-            if encrypted:
-                data["vault"].append({"title": vt, "cipher": encrypted})
-                save_data(data)
-                st.success("Saved to vault")
-            else:
-                st.error("Encryption failed.")
-
-        st.markdown("### Vault Items")
-        for v in data.get("vault", []):
-            decrypted = decrypt_text(vault_password, v.get("cipher", ""))
-            if decrypted is None:
-                st.write(f"**{v['title']}** - 🔒 Unable to decrypt")
-            else:
-                st.write(f"**{v['title']}** - {decrypted}")
+    st.header("Life Timeline")
+    st.write("Chronological record of saved interactions and memories.")
+    q = st.text_input("Search timeline (text)")
+    if q.strip():
+        results = [r for r in st.session_state.timeline if q.lower() in (r.get("note","")+r.get("echo","")).lower()]
+        st.write(f"Found {len(results)} results.")
+        for r in results[:50]:
+            st.write(f"- {r['timestamp']}: {r.get('note','')} -> {r.get('echo','')}")
     else:
-        st.warning("Enter vault password in sidebar to unlock.")
+        st.write("Recent timeline entries:")
+        for r in st.session_state.timeline[:40]:
+            st.write(f"- {r['timestamp']}: {r.get('note','')[:200]}")
 
+# -------------------------
+# Private Vault
+# -------------------------
+elif section == "Private Vault":
+    st.header("Private Vault (Encrypted)")
+    st.write("Sensitive memories are encrypted locally with Fernet (key stored in session or secrets).")
+    if not vault_pw:
+        st.info("Enter the vault password in the sidebar to unlock features.")
+    else:
+        st.success("Vault UI ready (UI password check is demo-only; encryption uses Fernet key above).")
+        k = st.text_input("Key to store/read")
+        v = st.text_area("Secret content")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Save to vault"):
+                encrypt_and_save_vault(k, v)
+                st.success("Saved and encrypted.")
+        with col2:
+            if st.button("Read from vault"):
+                out = read_vault(k)
+                if out is None:
+                    st.warning("Not found or decryption failed.")
+                else:
+                    st.code(out)
+
+# -------------------------
+# Network (Soul Resonance)
+# -------------------------
+elif section == "Network":
+    st.header("Soul Resonance Network (demo)")
+    note = st.text_area("Share a note with the network")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Broadcast to network"):
+            res = network_broadcast_share(note or "heartbeat")
+            st.success(res)
+    with col2:
+        if st.button("Query similar (demo)"):
+            q = st.text_input("Query")
+            if q:
+                hits = network_query_similar(q)
+                st.write("Hits:", hits)
+            else:
+                st.info("Type query then press button again.")
+
+# -------------------------
+# Simulations (Life path, Time-shifted)
+# -------------------------
+elif section == "Simulations":
+    st.header("Life Path Simulation & Time-Shifted Self")
+    mode = st.selectbox("Mode", ["Time-Shift (past)","Time-Shift (future)","Life Path Simulation","Consciousness Mirror"])
+    if mode.startswith("Time-Shift"):
+        user_q = st.text_input("Ask your shifted self something")
+        if st.button("Talk to shifted self"):
+            shift = "past" if "past" in mode else "future"
+            out = time_shifted_self(user_q, shift=shift)
+            st.markdown(f"**{shift.title()} Self:** {out}")
+    elif mode == "Life Path Simulation":
+        st.write("Create simple choices to simulate.")
+        c1 = st.text_input("Choice 1 title", "Move to new city")
+        c2 = st.text_input("Choice 2 title", "Stay and upskill")
+        if st.button("Simulate"):
+            choices = [{"title":c1},{"title":c2}]
+            sims = simulate_life_path({}, choices)
+            for s in sims:
+                st.write(s)
+    elif mode == "Consciousness Mirror":
+        txt = st.text_area("Write some thoughts")
+        if st.button("Reflect"):
+            st.write(mirror_reflection(txt))
+
+# -------------------------
+# Live Call (if supported)
+# -------------------------
+elif section == "Live Call":
+    st.header("Live Call (speech <-> EchoSoul)")
+    if not WEBSUPPORT:
+        st.error("streamlit-webrtc not available in this environment. Install streamlit-webrtc and av.")
+    elif not AUDIO_SUPPORT:
+        st.warning("Speech libraries (speech_recognition, pyttsx3) not available. Install them to enable speech.")
+    else:
+        st.info("Start a live call. Microphone access is required.")
+        # This is a simple connector: for robust call you'd need client-side audio -> server chunking.
+        webrtc_streamer(
+            key="echosoul-voice",
+            mode=WebRtcMode.SENDRECV,
+            media_stream_constraints={"audio": True, "video": False},
+            rtc_configuration=None,
+        )
+        st.write("Live call running (demo). Speak, then use Chat to ask questions based on your call transcript (you'll need to implement a chunking thread to capture raw audio frames -> speech_recognition).")
+
+# -------------------------
+# Export / About
+# -------------------------
 elif section == "Export/Info":
-    st.subheader("Export Data / Info")
-    st.download_button("Download timeline (JSON)", json.dumps(data["timeline"], indent=2), file_name="timeline.json")
-    st.download_button("Download vault (JSON)", json.dumps(data["vault"], indent=2), file_name="vault.json")
-    st.info("EchoSoul stores memories, vault items, and lets you chat with AI. Data is saved locally in `data.json`.")
+    st.header("Export & Backup")
+    if st.button("Export timeline JSON"):
+        save_json(TIMELINE_FILE, st.session_state.timeline)
+        st.success(f"Saved {TIMELINE_FILE}")
+    if st.button("Export memories JSON"):
+        save_json(MEMORY_FILE, st.session_state.memories)
+        st.success(f"Saved {MEMORY_FILE}")
+    st.markdown("**Persona**")
+    st.json(st.session_state.persona)
+    st.markdown("**Knowledge snapshot (recent)**")
+    st.write(st.session_state.knowledge[-20:])
+
+# -------------------------
+# About
+# -------------------------
+elif section == "About":
+    st.header("About EchoSoul")
+    st.write("""
+EchoSoul is an experimental personal AI companion that demonstrates:
+- persistent memory & timeline
+- adaptive personality & style learning
+- encrypted vault for sensitive notes
+- time-shifted self roleplay (past/future)
+- soul resonance network (demo broadcast & query)
+- life-path simulation (heuristic)
+- live call (simple demo via streamlit-webrtc)
+    
+**Limitations & notes**
+- For real production readiness you must supply OpenAI keys and configure WebRTC/TURN servers for reliable audio calls.
+- The vault uses Fernet symmetric encryption; protect the `FERNET_KEY` if you persist it in secrets.
+- Several advanced features are implemented as *functional demos* (e.g., network and simulations). If you want fully decentralized multi-peer networking, we'd add a server / webhooks / authentication layer.
+""")
+
+# -------------------------
+# Footer: keep autosave of timeline/memories
+# -------------------------
+# Persist timeline/memories periodically or on exit actions (we save on each add already).
+if st.button("Force save all data"):
+    save_json(TIMELINE_FILE, st.session_state.timeline)
+    save_json(MEMORY_FILE, st.session_state.memories)
+    save_json(PERSONA_FILE, st.session_state.persona)
+    save_json(VAULT_FILE, st.session_state.vault)
+    st.success("Saved all data.")
