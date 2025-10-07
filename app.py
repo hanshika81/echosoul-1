@@ -176,6 +176,8 @@ def generate_echo_response(user_text: str, profile: dict, context: Optional[str]
         prefix += f" Address the user by name: {profile.get('name')}."
     if mode == "legacy":
         prefix += " Answer like a wise older version of the user."
+    if mode == "time-shift":
+        prefix += " Answer as a time-shifted version of the user."
     if context:
         prefix += f"\nContext (recent memories):\n{context}"
     system_msg = {"role": "system", "content": prefix}
@@ -294,7 +296,6 @@ with tabs[4]:
             save_chat_message("user", legacy_q)
             save_chat_message("echo", f"(Legacy) {reply}", ok)
             st.markdown(f"Legacy Echo: {reply}")
-            st.rerun()
 
 # ---------- Soul Resonance ----------
 with tabs[5]:
@@ -306,7 +307,6 @@ with tabs[5]:
             save_chat_message("user", res_in)
             save_chat_message("echo", f"(Resonance) {reply}", ok)
             st.markdown(f"Resonance Reply: {reply}")
-            st.rerun()
 
 # ---------- Live Call ----------
 with tabs[6]:
